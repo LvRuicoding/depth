@@ -8,7 +8,7 @@
 
 `output/depth/unified6/single_frame/da3_small_lingbot_tokenfusion_last_patchdepth4m_voxel_prefusion_promptda_scaled`
 
-仓库不包含数据、Unified6 v3 manifests、DA3-small 基础权重、训练 checkpoint 或输出。所有这些均通过路径参数传入。训练和评测固定使用 4 张 GPU；模型结构、优化器、学习率、10 个 epoch、均衡采样、输入尺寸、稀疏点数和评测协议均不提供可变参数。
+仓库不包含数据、Unified6 v3 manifests、DA3-small 基础权重、训练 checkpoint 或输出。所有这些均通过路径参数传入。训练和评测固定使用 4 张 GPU；模型结构、优化器、学习率、10 个 epoch、输入尺寸、稀疏点数和评测协议均不提供可变参数。训练提供原实验的域均衡模式，以及不做域均衡的自然比例模式。
 
 ## 训练
 
@@ -28,6 +28,27 @@ scripts/run_unified6.sh train \
 续训只需追加 `--resume /path/to/checkpoint-last.pth`。
 
 固定训练协议：4 GPU、每卡 batch size 1、bf16、AdamW、`lr=1e-4`、`weight_decay=1e-4`、1 epoch warmup、cosine 到 `1e-6`、10 epochs、每域每 epoch 4826 个样本、dense-depth loss 权重 0.1。
+
+## 不使用域均衡的多数据集训练
+
+把上述训练命令的入口改为 `train-natural`，其余参数不变：
+
+```bash
+scripts/run_unified6.sh train-natural \
+  --da3-checkpoint /home/dataset-local/lr/code/OccAny/checkpoints/da3_small \
+  --manifest-dir /home/dataset-local/lr/code/OccAny/data/unified_depth_splits_v3 \
+  --kitti-root /home/dataset-local/lr/code/OccAny/data/kitti_processed \
+  --ddad-root /home/dataset-local/lr/code/OccAny/data/ddad_processed \
+  --seven-scenes-root /home/dataset-local/lr/code/OccAny/raw_data/7-Scenes/OpenDataLab___7-Scenes/raw \
+  --nyuv2-root /home/dataset-local/lr/code/OccAny/raw_data/NYUv2 \
+  --sunrgbd-root /home/dataset-local/lr/code/OccAny/raw_data/SUN_RGB-D/OpenDataLab___SUN_RGB-D/raw/SUNRGBD \
+  --void-root /home/dataset-local/lr/code/OccAny/raw_data/VOID \
+  --output-dir /path/to/natural-output
+```
+
+该模式直接打乱六个训练集拼接后的全局索引，不为数据域设置配额，也不对小域做过采样。每个 epoch 全量遍历 96,648 个样本：KITTI 3,659、DDAD 12,650、7-Scenes 26,000、NYUv2 795、SUN RGB-D 5,285、VOID 48,259；4 卡时每卡 24,162 个样本。其余训练超参数与上面的域均衡模式一致。
+
+自然比例训练的 checkpoint 会记录独立的采样协议；续训仍追加 `--resume`，但不能在域均衡与自然比例 checkpoint 之间交叉续训。
 
 ## 评测
 

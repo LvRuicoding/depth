@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader, SequentialSampler, Subset
+from torch.utils.data import DataLoader, DistributedSampler, SequentialSampler, Subset
 
 from .data import (
     DOMAIN_NAMES,
@@ -43,6 +43,11 @@ LEARNING_RATE = 1.0e-4
 MIN_LEARNING_RATE = 1.0e-6
 WEIGHT_DECAY = 1.0e-4
 WARMUP_EPOCHS = 1
+BALANCED_SAMPLING_CONTRACT = (
+    "equal_domain_persistent_no_replacement_full_coverage_over_20_epochs_v1"
+)
+NATURAL_SAMPLING_CONTRACT = "natural_concat_distributed_shuffle_full_pass_per_epoch_v1"
+NATURAL_EXPERIMENT = f"{EXPERIMENT}_natural"
 
 
 def parser() -> argparse.ArgumentParser:
@@ -57,6 +62,12 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--void-root", required=True)
     value.add_argument("--output-dir", required=True)
     value.add_argument("--resume", default=None)
+    value.add_argument(
+        "--sampling",
+        choices=("balanced", "natural"),
+        default="balanced",
+        help="balanced reproduces the original run; natural keeps raw domain proportions.",
+    )
     value.add_argument("--smoke-steps", type=int, default=0, help=argparse.SUPPRESS)
     return value
 
@@ -85,9 +96,14 @@ def _init_distributed() -> tuple[torch.device, int, int, int]:
 
 
 def _fixed_args(args: argparse.Namespace, world: int) -> Dict[str, Any]:
+    sampling_contract = (
+        BALANCED_SAMPLING_CONTRACT
+        if args.sampling == "balanced"
+        else NATURAL_SAMPLING_CONTRACT
+    )
     return {
         **vars(args),
-        "exp": EXPERIMENT,
+        "exp": EXPERIMENT if args.sampling == "balanced" else NATURAL_EXPERIMENT,
         "dataset": "unified6",
         "backbone": "da3",
         "da3_model_name": "da3-small",
@@ -111,6 +127,8 @@ def _fixed_args(args: argparse.Namespace, world: int) -> Dict[str, Any]:
         "unified_input_long_side": 518,
         "unified_sparse_points": 500,
         "unified_samples_per_epoch": 0,
+        "unified_sampling_mode": args.sampling,
+        "unified_sampling_contract": sampling_contract,
         "fusion_vox_origin": [-60.0, -5.0, 0.0],
         "fusion_vox_size": [0.4, 0.4, 0.4],
         "fusion_vox_grid": [300, 25, 300],
@@ -124,6 +142,48 @@ def _fixed_args(args: argparse.Namespace, world: int) -> Dict[str, Any]:
         "dpt_prompt_contract": DPT_PROMPT_CONTRACT,
         "initialization_contract": INITIALIZATION_CONTRACT,
     }
+
+
+def build_training_sampler(
+    dataset: torch.utils.data.Dataset,
+    *,
+    sampling: str,
+    rank: int,
+    world: int,
+) -> torch.utils.data.Sampler[int]:
+    """Build either the released equal-domain sampler or a natural full pass."""
+    if sampling == "balanced":
+        return DomainBalancedDistributedSampler(
+            dataset,  # type: ignore[arg-type]
+            samples_per_epoch=0,
+            coverage_epochs=EPOCHS,
+            seed=0,
+            num_replicas=world,
+            rank=rank,
+            shuffle=True,
+        )
+    if sampling == "natural":
+        # UnifiedSixDataset is a natural concatenation. DistributedSampler
+        # shuffles that single global index space, so domain probability is
+        # exactly proportional to each manifest's size. The current 96,648
+        # samples divide evenly over four ranks and require no padding.
+        return DistributedSampler(
+            dataset,
+            num_replicas=world,
+            rank=rank,
+            shuffle=True,
+            seed=0,
+            drop_last=False,
+        )
+    raise ValueError(f"Unknown sampling mode: {sampling!r}")
+
+
+def _checkpoint_sampling_contract(payload: Dict[str, Any]) -> str | None:
+    saved_args = payload.get("args", {})
+    if not isinstance(saved_args, dict):
+        saved_args = vars(saved_args)
+    value = saved_args.get("unified_sampling_contract")
+    return None if value is None else str(value)
 
 
 def _adjust_learning_rate(
@@ -224,6 +284,18 @@ def main() -> None:
     start_epoch, best_score = 0, float("inf")
     if args.resume:
         resume = torch.load(args.resume, map_location="cpu", weights_only=False)
+        saved_contract = _checkpoint_sampling_contract(resume)
+        expected_contract = str(fixed_args["unified_sampling_contract"])
+        if saved_contract is not None and saved_contract != expected_contract:
+            raise RuntimeError(
+                "Cannot resume with a different sampling policy: "
+                f"checkpoint={saved_contract!r}, requested={expected_contract!r}."
+            )
+        if args.sampling == "natural" and saved_contract is None:
+            raise RuntimeError(
+                "A natural-sampling run cannot resume a checkpoint that does not "
+                "record its sampling contract."
+            )
         ddp.module.load_state_dict(resume["model"], strict=True)
         optimizer.load_state_dict(resume["optimizer"])
         start_epoch = int(resume["epoch"]) + 1
@@ -239,14 +311,11 @@ def main() -> None:
         sampling_seed=0,
         strict_count=True,
     )
-    sampler = DomainBalancedDistributedSampler(
+    sampler = build_training_sampler(
         train_dataset,
-        samples_per_epoch=0,
-        coverage_epochs=EPOCHS,
-        seed=0,
-        num_replicas=world,
+        sampling=args.sampling,
         rank=rank,
-        shuffle=True,
+        world=world,
     )
     train_loader = DataLoader(
         train_dataset,
@@ -273,7 +342,26 @@ def main() -> None:
             },
             "data": {
                 "train_samples": len(train_dataset),
-                "logical_samples_per_epoch": sampler.logical_samples_per_epoch,
+                "sampling_mode": args.sampling,
+                "sampling_contract": fixed_args["unified_sampling_contract"],
+                "domain_samples_per_epoch": (
+                    {
+                        name: sampler.samples_per_domain
+                        for name in train_dataset.domain_names
+                    }
+                    if isinstance(sampler, DomainBalancedDistributedSampler)
+                    else {
+                        name: len(domain_dataset)
+                        for name, domain_dataset in zip(
+                            train_dataset.domain_names, train_dataset.datasets
+                        )
+                    }
+                ),
+                "logical_samples_per_epoch": (
+                    sampler.logical_samples_per_epoch
+                    if isinstance(sampler, DomainBalancedDistributedSampler)
+                    else len(train_dataset)
+                ),
                 "samples_per_rank": len(sampler),
             },
         }
@@ -360,7 +448,7 @@ def main() -> None:
                         "checkpoint_epoch": epoch,
                         "weights": str(output_dir / "checkpoint-best.pth"),
                         "zero_shot": False,
-                        "experiment": EXPERIMENT,
+                        "experiment": fixed_args["exp"],
                         "prediction_mode": "relative_online_knn_minmax",
                         "depth_scale_contract": SCALE_CONTRACT,
                         "requested_split": "val",
