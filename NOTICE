@@ -1,0 +1,7 @@
+OccAny-Depth-Min contains a focused extraction of code used by the OccAny
+Unified6 depth experiment.
+
+The DINOv2/Depth Anything 3 transformer layer code under
+occany_depth_min/da3 is derived from Depth Anything 3 and DINOv2 and retains
+their copyright and license headers. Those portions are provided under the
+Apache License 2.0.
