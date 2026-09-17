@@ -1,8 +1,9 @@
 """Exact target model: DA3-small + sparse-depth/voxel pre-fusion + PromptDA."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -31,6 +32,60 @@ INITIALIZATION_CONTRACT = (
     "da3_small_only_random_voxel_prefusion_promptda_dpt_"
     "online_knn_scaled_unified6_v1"
 )
+DEFAULT_MODEL_VARIANT = "prefusion"
+POSTFUSION_MODEL_VARIANT = "postfusion"
+MODEL_VARIANTS = (DEFAULT_MODEL_VARIANT, POSTFUSION_MODEL_VARIANT)
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    variant: str
+    model_class: str
+    experiment: str
+    fusion_contract: str
+    initialization_contract: str
+
+
+MODEL_SPECS = {
+    DEFAULT_MODEL_VARIANT: ModelSpec(
+        variant=DEFAULT_MODEL_VARIANT,
+        model_class=MODEL_CLASS,
+        experiment=(
+            "depth_lingbot_da3_last_patchdepth4m_voxel_prefusion_"
+            "promptda_scaled_unified6"
+        ),
+        fusion_contract=FUSION_CONTRACT,
+        initialization_contract=INITIALIZATION_CONTRACT,
+    ),
+    POSTFUSION_MODEL_VARIANT: ModelSpec(
+        variant=POSTFUSION_MODEL_VARIANT,
+        model_class=(
+            "Stage1DepthPatchDepth4mVoxelDepthDualWindowPostFusionOnlyOnlineKNN"
+            "PromptDAScaledPreAlignedUnified6Model"
+        ),
+        experiment=(
+            "depth_patchdepth4m_voxeldepth_dualwindow_postfusion_only_"
+            "promptda_scaled_prefusion_aligned_unified6"
+        ),
+        fusion_contract=(
+            "da3_cat_localglobal_patchdepth4m_voxel_shareddual_shift02_sparse_log_"
+            "depth_patch_embed_shareddual_shift02_metric_v4"
+        ),
+        initialization_contract=(
+            "da3_small_only_seeded_logdepth_patchdepth4m_voxel_dualwindow_"
+            "promptda_dpt_online_knn_scaled_unified6_v1"
+        ),
+    ),
+}
+
+
+def get_model_spec(variant: str) -> ModelSpec:
+    try:
+        return MODEL_SPECS[str(variant)]
+    except KeyError as error:
+        raise ValueError(
+            f"Unknown model variant {variant!r}; expected one of {MODEL_VARIANTS}."
+        ) from error
 
 
 class _DinoV2(nn.Module):
@@ -541,8 +596,18 @@ def build_model(
     da3_checkpoint: str | Path | None = None,
     *,
     load_base: bool = True,
-) -> TargetDepthModel:
-    return TargetDepthModel(da3_checkpoint=da3_checkpoint, load_base=load_base)
+    variant: str = DEFAULT_MODEL_VARIANT,
+) -> nn.Module:
+    if variant == DEFAULT_MODEL_VARIANT:
+        return TargetDepthModel(da3_checkpoint=da3_checkpoint, load_base=load_base)
+    if variant == POSTFUSION_MODEL_VARIANT:
+        from .postfusion import PostFusionDepthModel
+
+        return PostFusionDepthModel(
+            da3_checkpoint=da3_checkpoint, load_base=load_base
+        )
+    get_model_spec(variant)
+    raise AssertionError("unreachable")
 
 
 def load_trained_checkpoint(

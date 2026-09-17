@@ -1,4 +1,4 @@
-"""Exact four-GPU trainer for the one retained Unified6 depth model."""
+"""Exact four-GPU trainer for the retained Unified6 depth models."""
 from __future__ import annotations
 
 import argparse
@@ -24,16 +24,16 @@ from .data import (
     collate_unified_depth_online_knn4,
 )
 from .depth_head import dense_metric_depth_loss
-from .eval import EXPERIMENT, write_results
+from .eval import write_results
 from .metrics import best_checkpoint_score, macro_average_domains
 from .model import (
     DPT_PROMPT_CONTRACT,
-    FUSION_CONTRACT,
-    INITIALIZATION_CONTRACT,
-    MODEL_CLASS,
+    DEFAULT_MODEL_VARIANT,
+    MODEL_VARIANTS,
     ONLINE_KNN_CONTRACT,
     SCALE_CONTRACT,
     build_model,
+    get_model_spec,
 )
 from .runtime import evaluate_loader, forward_batch, move_to_device
 
@@ -47,7 +47,6 @@ BALANCED_SAMPLING_CONTRACT = (
     "equal_domain_persistent_no_replacement_full_coverage_over_20_epochs_v1"
 )
 NATURAL_SAMPLING_CONTRACT = "natural_concat_distributed_shuffle_full_pass_per_epoch_v1"
-NATURAL_EXPERIMENT = f"{EXPERIMENT}_natural"
 
 
 def parser() -> argparse.ArgumentParser:
@@ -62,6 +61,12 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--void-root", required=True)
     value.add_argument("--output-dir", required=True)
     value.add_argument("--resume", default=None)
+    value.add_argument(
+        "--model",
+        choices=MODEL_VARIANTS,
+        default=DEFAULT_MODEL_VARIANT,
+        help="Architecture to train.",
+    )
     value.add_argument(
         "--sampling",
         choices=("balanced", "natural"),
@@ -96,14 +101,20 @@ def _init_distributed() -> tuple[torch.device, int, int, int]:
 
 
 def _fixed_args(args: argparse.Namespace, world: int) -> Dict[str, Any]:
+    spec = get_model_spec(args.model)
     sampling_contract = (
         BALANCED_SAMPLING_CONTRACT
         if args.sampling == "balanced"
         else NATURAL_SAMPLING_CONTRACT
     )
-    return {
+    fixed = {
         **vars(args),
-        "exp": EXPERIMENT if args.sampling == "balanced" else NATURAL_EXPERIMENT,
+        "exp": (
+            spec.experiment
+            if args.sampling == "balanced"
+            else f"{spec.experiment}_natural"
+        ),
+        "model_variant": spec.variant,
         "dataset": "unified6",
         "backbone": "da3",
         "da3_model_name": "da3-small",
@@ -135,13 +146,20 @@ def _fixed_args(args: argparse.Namespace, world: int) -> Dict[str, Any]:
         "fusion_depth_bin_size": 4.0,
         "seed": 0,
         "world_size": world,
-        "model_class": MODEL_CLASS,
-        "lingbot_da3_voxel_prefusion_contract": FUSION_CONTRACT,
+        "model_class": spec.model_class,
+        "fusion_contract": spec.fusion_contract,
         "depth_scale_contract": SCALE_CONTRACT,
         "online_knn_contract": ONLINE_KNN_CONTRACT,
         "dpt_prompt_contract": DPT_PROMPT_CONTRACT,
-        "initialization_contract": INITIALIZATION_CONTRACT,
+        "initialization_contract": spec.initialization_contract,
     }
+    if args.model == DEFAULT_MODEL_VARIANT:
+        fixed["lingbot_da3_voxel_prefusion_contract"] = spec.fusion_contract
+    else:
+        fixed["patch_depth4m_voxeldepth_dualwindow_contract"] = spec.fusion_contract
+        fixed["depth_token_source"] = "sparse_log_patch"
+        fixed["voxel_token_source"] = "patch_depth4m"
+    return fixed
 
 
 def build_training_sampler(
@@ -178,11 +196,17 @@ def build_training_sampler(
     raise ValueError(f"Unknown sampling mode: {sampling!r}")
 
 
-def _checkpoint_sampling_contract(payload: Dict[str, Any]) -> str | None:
+def _checkpoint_args(payload: Dict[str, Any]) -> Dict[str, Any]:
     saved_args = payload.get("args", {})
-    if not isinstance(saved_args, dict):
-        saved_args = vars(saved_args)
-    value = saved_args.get("unified_sampling_contract")
+    if isinstance(saved_args, dict):
+        return saved_args
+    if hasattr(saved_args, "__dict__"):
+        return vars(saved_args)
+    return {}
+
+
+def _checkpoint_sampling_contract(payload: Dict[str, Any]) -> str | None:
+    value = _checkpoint_args(payload).get("unified_sampling_contract")
     return None if value is None else str(value)
 
 
@@ -266,7 +290,9 @@ def main() -> None:
     dist.barrier(device_ids=[local_rank])
 
     fixed_args = _fixed_args(args, world)
-    model = build_model(args.da3_checkpoint, load_base=True).to(device)
+    model = build_model(
+        args.da3_checkpoint, load_base=True, variant=args.model
+    ).to(device)
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     ddp = DistributedDataParallel(
         model,
@@ -284,6 +310,19 @@ def main() -> None:
     start_epoch, best_score = 0, float("inf")
     if args.resume:
         resume = torch.load(args.resume, map_location="cpu", weights_only=False)
+        saved_initialization = _checkpoint_args(resume).get(
+            "initialization_contract"
+        )
+        expected_initialization = fixed_args["initialization_contract"]
+        if (
+            saved_initialization is not None
+            and saved_initialization != expected_initialization
+        ):
+            raise RuntimeError(
+                "Cannot resume with a different model architecture: "
+                f"checkpoint={saved_initialization!r}, "
+                f"requested={expected_initialization!r}."
+            )
         saved_contract = _checkpoint_sampling_contract(resume)
         expected_contract = str(fixed_args["unified_sampling_contract"])
         if saved_contract is not None and saved_contract != expected_contract:
@@ -332,7 +371,8 @@ def main() -> None:
         config = {
             "args": fixed_args,
             "model": {
-                "class": MODEL_CLASS,
+                "variant": args.model,
+                "class": fixed_args["model_class"],
                 "total_params": sum(parameter.numel() for parameter in ddp.module.parameters()),
                 "trainable_params": sum(
                     parameter.numel()

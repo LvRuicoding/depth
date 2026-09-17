@@ -1,4 +1,4 @@
-"""Strict four-GPU evaluation entry point for the target checkpoint."""
+"""Strict four-GPU evaluation entry point for the retained checkpoints."""
 from __future__ import annotations
 
 import argparse
@@ -20,17 +20,15 @@ from .data import (
 from .metrics import best_checkpoint_score, macro_average_domains
 from .model import (
     DPT_PROMPT_CONTRACT,
-    INITIALIZATION_CONTRACT,
-    MODEL_CLASS,
+    DEFAULT_MODEL_VARIANT,
+    MODEL_VARIANTS,
     ONLINE_KNN_CONTRACT,
     SCALE_CONTRACT,
     build_model,
+    get_model_spec,
     load_trained_checkpoint,
 )
 from .runtime import evaluate_loader
-
-
-EXPERIMENT = "depth_lingbot_da3_last_patchdepth4m_voxel_prefusion_promptda_scaled_unified6"
 
 
 def _json_safe(value: Any) -> Any:
@@ -55,9 +53,9 @@ def write_results(payload: Mapping[str, Any], output_json: str | Path) -> None:
             "checkpoint_epoch": safe["checkpoint_epoch"],
             "weights": safe["weights"],
             "zero_shot": False,
-            "experiment": EXPERIMENT,
+            "experiment": safe["experiment"],
             "prediction_mode": "relative_online_knn_minmax",
-            "depth_scale_contract": SCALE_CONTRACT,
+            "depth_scale_contract": safe["depth_scale_contract"],
             "split": "val",
             "dataset": result,
         }
@@ -95,6 +93,12 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--void-root", required=True)
     value.add_argument("--output-json", required=True)
     value.add_argument(
+        "--model",
+        choices=MODEL_VARIANTS,
+        default=DEFAULT_MODEL_VARIANT,
+        help="Checkpoint architecture to evaluate.",
+    )
+    value.add_argument(
         "--domains",
         default="all",
         help="Evaluation stage control: all or one comma-separated subset.",
@@ -109,7 +113,8 @@ def main() -> None:
     checkpoint = Path(args.checkpoint).expanduser().resolve()
     if checkpoint.is_dir():
         checkpoint = checkpoint / "checkpoint-best.pth"
-    model = build_model(load_base=False)
+    spec = get_model_spec(args.model)
+    model = build_model(load_base=False, variant=args.model)
     payload = load_trained_checkpoint(model, checkpoint)
     model.to(device)
     model.eval()
@@ -163,13 +168,14 @@ def main() -> None:
             "checkpoint_epoch": int(payload.get("epoch", -1)),
             "weights": str(checkpoint),
             "zero_shot": False,
-            "experiment": EXPERIMENT,
-            "model_class": MODEL_CLASS,
+            "experiment": spec.experiment,
+            "model_variant": spec.variant,
+            "model_class": spec.model_class,
             "prediction_mode": "relative_online_knn_minmax",
             "depth_scale_contract": SCALE_CONTRACT,
             "online_knn_contract": ONLINE_KNN_CONTRACT,
             "dpt_prompt_contract": DPT_PROMPT_CONTRACT,
-            "initialization_contract": INITIALIZATION_CONTRACT,
+            "initialization_contract": spec.initialization_contract,
             "requested_split": "val",
             "dataset_splits": {name: "val" for name in domains},
             "datasets": results,
