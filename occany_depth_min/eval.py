@@ -1,4 +1,4 @@
-"""Strict four-GPU evaluation entry point for the retained checkpoints."""
+"""Strict four-GPU Unified6 or KITTI evaluation for retained checkpoints."""
 from __future__ import annotations
 
 import argparse
@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader, SequentialSampler, Subset
 
 from .data import (
     DOMAIN_NAMES,
+    build_kitti_depth_dataset,
     build_unified_depth_dataset,
     collate_unified_depth_online_knn4,
 )
@@ -21,6 +22,7 @@ from .metrics import best_checkpoint_score, macro_average_domains
 from .model import (
     DPT_PROMPT_CONTRACT,
     DEFAULT_MODEL_VARIANT,
+    KITTI_ONLINE_KNN_CONTRACT,
     MODEL_VARIANTS,
     ONLINE_KNN_CONTRACT,
     SCALE_CONTRACT,
@@ -84,13 +86,14 @@ def _root(args: argparse.Namespace, domain: str) -> str:
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
     value.add_argument("--checkpoint", required=True)
-    value.add_argument("--manifest-dir", required=True)
-    value.add_argument("--kitti-root", required=True)
-    value.add_argument("--ddad-root", required=True)
-    value.add_argument("--seven-scenes-root", required=True)
-    value.add_argument("--nyuv2-root", required=True)
-    value.add_argument("--sunrgbd-root", required=True)
-    value.add_argument("--void-root", required=True)
+    value.add_argument("--dataset", choices=("unified6", "kitti"), default="unified6")
+    value.add_argument("--manifest-dir")
+    value.add_argument("--kitti-root")
+    value.add_argument("--ddad-root")
+    value.add_argument("--seven-scenes-root")
+    value.add_argument("--nyuv2-root")
+    value.add_argument("--sunrgbd-root")
+    value.add_argument("--void-root")
     value.add_argument("--output-json", required=True)
     value.add_argument(
         "--model",
@@ -107,38 +110,69 @@ def parser() -> argparse.ArgumentParser:
     return value
 
 
+def _validate_paths(args: argparse.Namespace) -> None:
+    required = ["kitti_root"]
+    if args.dataset == "unified6":
+        required.extend(
+            (
+                "manifest_dir",
+                "ddad_root",
+                "seven_scenes_root",
+                "nyuv2_root",
+                "sunrgbd_root",
+                "void_root",
+            )
+        )
+    missing = [f"--{name.replace('_', '-')}" for name in required if not getattr(args, name)]
+    if missing:
+        raise ValueError(f"{args.dataset} evaluation requires {', '.join(missing)}.")
+
+
 def main() -> None:
     args = parser().parse_args()
+    _validate_paths(args)
     device, rank, world = _distributed_device()
     checkpoint = Path(args.checkpoint).expanduser().resolve()
     if checkpoint.is_dir():
-        checkpoint = checkpoint / "checkpoint-best.pth"
-    spec = get_model_spec(args.model)
+        checkpoint = checkpoint / (
+            "checkpoint-last.pth" if args.dataset == "kitti" else "checkpoint-best.pth"
+        )
+    spec = get_model_spec(args.model, args.dataset)
     model = build_model(load_base=False, variant=args.model)
     payload = load_trained_checkpoint(model, checkpoint)
     model.to(device)
     model.eval()
 
-    domains = DOMAIN_NAMES if args.domains == "all" else tuple(
-        item.strip() for item in args.domains.split(",") if item.strip()
-    )
+    if args.domains == "all":
+        domains = ("kitti",) if args.dataset == "kitti" else DOMAIN_NAMES
+    else:
+        domains = tuple(
+            item.strip() for item in args.domains.split(",") if item.strip()
+        )
     invalid = [name for name in domains if name not in DOMAIN_NAMES]
     if invalid:
         raise ValueError(f"Unknown evaluation domains: {invalid}")
+    if args.dataset == "kitti" and domains != ("kitti",):
+        raise ValueError("KITTI-only evaluation accepts only --domains kitti.")
 
     results: Dict[str, Dict[str, Any]] = {}
     for domain in domains:
-        dataset = build_unified_depth_dataset(
-            domain,
-            _root(args, domain),
-            "val",
-            manifest_dir=args.manifest_dir,
-            input_long_side=518,
-            patch_size=14,
-            synthetic_sparse_points=500,
-            sampling_seed=0,
-            strict_count=True,
-        )
+        if args.dataset == "kitti":
+            dataset = build_kitti_depth_dataset(
+                str(args.kitti_root), "val", strict_count=True
+            )
+        else:
+            dataset = build_unified_depth_dataset(
+                domain,
+                _root(args, domain),
+                "val",
+                manifest_dir=str(args.manifest_dir),
+                input_long_side=518,
+                patch_size=14,
+                synthetic_sparse_points=500,
+                sampling_seed=0,
+                strict_count=True,
+            )
         shard = Subset(dataset, list(range(rank, len(dataset), world)))
         loader = DataLoader(
             shard,
@@ -173,7 +207,11 @@ def main() -> None:
             "model_class": spec.model_class,
             "prediction_mode": "relative_online_knn_minmax",
             "depth_scale_contract": SCALE_CONTRACT,
-            "online_knn_contract": ONLINE_KNN_CONTRACT,
+            "online_knn_contract": (
+                KITTI_ONLINE_KNN_CONTRACT
+                if args.dataset == "kitti"
+                else ONLINE_KNN_CONTRACT
+            ),
             "dpt_prompt_contract": DPT_PROMPT_CONTRACT,
             "initialization_contract": spec.initialization_contract,
             "requested_split": "val",
@@ -181,7 +219,7 @@ def main() -> None:
             "datasets": results,
             "cross_domain_macro": macro,
         }
-        if tuple(domains) == DOMAIN_NAMES and args.max_batches == 0:
+        if args.dataset == "unified6" and tuple(domains) == DOMAIN_NAMES and args.max_batches == 0:
             output["best_checkpoint_score_abs_rel"] = best_checkpoint_score(results)
         write_results(output, args.output_json)
         print(json.dumps(_json_safe(macro), indent=2), flush=True)

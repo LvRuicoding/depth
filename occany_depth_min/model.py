@@ -27,6 +27,10 @@ SCALE_CONTRACT = "online_knn4_minmax_sigmoid_metric_v1"
 ONLINE_KNN_CONTRACT = (
     "unified_sparse_map_pixel_euclidean_inverse_distance_k4_online_no_cache_v1"
 )
+KITTI_ONLINE_KNN_CONTRACT = (
+    "kitti_stage1_lidar_zbuffer_pixel_euclidean_inverse_distance_k4_"
+    "online_no_cache_v1"
+)
 DPT_PROMPT_CONTRACT = "online_knn4_per_frame_minmax_promptda_dpt4_scaled_v1"
 INITIALIZATION_CONTRACT = (
     "da3_small_only_random_voxel_prefusion_promptda_dpt_"
@@ -78,10 +82,47 @@ MODEL_SPECS = {
     ),
 }
 
+KITTI_MODEL_SPECS = {
+    DEFAULT_MODEL_VARIANT: ModelSpec(
+        variant=DEFAULT_MODEL_VARIANT,
+        model_class=MODEL_CLASS,
+        experiment=(
+            "depth_lingbot_da3_last_patchdepth4m_voxel_prefusion_"
+            "promptda_scaled_kitti"
+        ),
+        fusion_contract=FUSION_CONTRACT,
+        initialization_contract=(
+            "da3_small_only_random_lingbot_voxel_promptda_last_kitti_v1"
+        ),
+    ),
+    POSTFUSION_MODEL_VARIANT: ModelSpec(
+        variant=POSTFUSION_MODEL_VARIANT,
+        model_class=(
+            "Stage1DepthPatchDepth4mVoxelDepthDualWindowPostFusionOnlyOnlineKNN"
+            "PromptDAScaledPreAlignedKITTIModel"
+        ),
+        experiment=(
+            "depth_patchdepth4m_voxeldepth_dualwindow_postfusion_only_"
+            "promptda_scaled_prefusion_aligned"
+        ),
+        fusion_contract=(
+            "da3_cat_localglobal_patchdepth4m_voxel_shareddual_shift02_sparse_log_"
+            "depth_patch_embed_shareddual_shift02_metric_v4"
+        ),
+        initialization_contract=(
+            "da3_small_only_seeded_logdepth_patchdepth4m_voxel_dualwindow_"
+            "promptda_dpt_online_knn_scaled_kitti_v1"
+        ),
+    ),
+}
 
-def get_model_spec(variant: str) -> ModelSpec:
+
+def get_model_spec(variant: str, dataset: str = "unified6") -> ModelSpec:
+    specs = KITTI_MODEL_SPECS if dataset == "kitti" else MODEL_SPECS
+    if dataset not in ("unified6", "kitti"):
+        raise ValueError("dataset must be 'unified6' or 'kitti'.")
     try:
-        return MODEL_SPECS[str(variant)]
+        return specs[str(variant)]
     except KeyError as error:
         raise ValueError(
             f"Unknown model variant {variant!r}; expected one of {MODEL_VARIANTS}."

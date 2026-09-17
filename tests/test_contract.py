@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 import torch
 
-from occany_depth_min.model import build_model, load_trained_checkpoint
+from occany_depth_min.model import build_model, get_model_spec, load_trained_checkpoint
+from occany_depth_min.train import KITTI_EPOCHS, _fixed_args, parser as train_parser
 
 
 REFERENCE = Path(os.environ.get("OCCANY_REFERENCE_CHECKPOINT", "__missing__"))
@@ -56,3 +57,41 @@ def test_postfusion_reference_checkpoint_strict_load() -> None:
     model = build_model(load_base=False, variant="postfusion")
     payload = load_trained_checkpoint(model, POSTFUSION_REFERENCE)
     assert payload["epoch"] == 9
+
+
+def test_kitti_only_training_contracts() -> None:
+    expected = {
+        "prefusion": (
+            "depth_lingbot_da3_last_patchdepth4m_voxel_prefusion_promptda_scaled_kitti",
+            "da3_small_only_random_lingbot_voxel_promptda_last_kitti_v1",
+        ),
+        "postfusion": (
+            "depth_patchdepth4m_voxeldepth_dualwindow_postfusion_only_"
+            "promptda_scaled_prefusion_aligned",
+            "da3_small_only_seeded_logdepth_patchdepth4m_voxel_dualwindow_"
+            "promptda_dpt_online_knn_scaled_kitti_v1",
+        ),
+    }
+    for variant, (experiment, initialization) in expected.items():
+        spec = get_model_spec(variant, "kitti")
+        assert spec.experiment == experiment
+        assert spec.initialization_contract == initialization
+        args = train_parser().parse_args(
+            [
+                "--dataset",
+                "kitti",
+                "--model",
+                variant,
+                "--da3-checkpoint",
+                "base",
+                "--kitti-root",
+                "data",
+                "--output-dir",
+                "output",
+            ]
+        )
+        fixed = _fixed_args(args, 4)
+        assert fixed["epochs"] == KITTI_EPOCHS == 20
+        assert fixed["dataset"] == "kitti"
+        assert fixed["dynamic_image_size"] is None
+        assert fixed["online_knn_contract"].startswith("kitti_stage1_lidar_zbuffer")

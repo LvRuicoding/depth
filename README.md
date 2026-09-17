@@ -1,6 +1,6 @@
 # OccAny-Depth-Min
 
-这个仓库只保留以下两个模型的训练与六域原生分辨率评测代码：
+这个仓库只保留以下两个模型的 Unified6 与 KITTI-only 训练/评测代码：
 
 `Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionOnlineKNNPromptDAScaledUnified6Model`
 
@@ -14,7 +14,9 @@
 
 `output/depth/unified6/single_frame/da3_small_patchdepth4m_voxeldepth_dualwindow_postfusion_only_promptda_scaled_prefusion_aligned_depthlogpatch_voxelpatch4m`
 
-仓库不包含数据、Unified6 v3 manifests、DA3-small 基础权重、训练 checkpoint 或输出。所有这些均通过路径参数传入。训练和评测固定使用 4 张 GPU；模型结构、优化器、学习率、10 个 epoch、输入尺寸、稀疏点数和评测协议均不提供可变参数。训练提供原实验的域均衡模式，以及不做域均衡的自然比例模式。
+仓库不包含数据、Unified6 v3 manifests、DA3-small 基础权重、训练 checkpoint 或输出。所有这些均通过路径参数传入。训练和评测固定使用 4 张 GPU；模型结构、优化器、学习率、输入尺寸、训练轮数和评测协议均不提供可变参数。Unified6 训练提供原实验的域均衡模式，以及不做域均衡的自然比例模式。
+
+Unified6 固定训练 10 个 epoch；KITTI-only 复现原实验的 3834/815 train/val 划分、518×168 principal-point crop、KITTI 体素网格、在线 LiDAR KNN-4 和 20 个 epoch。KITTI-only 不读取 Unified manifest。
 
 ## 模型一：DA3 前融合训练
 
@@ -109,9 +111,29 @@ scripts/run_unified6.sh eval-postfusion \
   --output-json /path/to/postfusion-eval.json
 ```
 
+## KITTI-only 训练与评测
+
+前融合模型：
+
+```bash
+scripts/run_unified6.sh train-kitti \
+  --da3-checkpoint /home/dataset-local/lr/code/OccAny/checkpoints/da3_small \
+  --kitti-root /home/dataset-local/lr/code/OccAny/data/kitti_processed \
+  --output-dir /path/to/kitti-output
+
+scripts/run_unified6.sh eval-kitti \
+  --checkpoint /path/to/kitti-output/checkpoint-last.pth \
+  --kitti-root /home/dataset-local/lr/code/OccAny/data/kitti_processed \
+  --output-json /path/to/kitti-eval.json
+```
+
+双窗口后融合模型将入口分别改为 `train-postfusion-kitti` 和 `eval-postfusion-kitti`，参数不变。两种训练都支持 `--resume /path/to/checkpoint-last.pth`；也可以直接评测原仓库相应的 KITTI-only checkpoint。
+
+KITTI-only 固定使用 4 GPU、每卡 batch size 1、bf16、AdamW、`lr=1e-4`、1 epoch warmup、cosine 到 `1e-6`、20 epochs，并在每个 epoch 后只评测 KITTI val。缺少 `dense_depthmap` 的训练帧仍保留在采样序列中，但由 frame mask 跳过 dense-depth loss；因此训练集是原协议的 3834 帧，而不是 Unified6 manifest 中的 3659 帧。
+
 ## 保真约束
 
 - 两个原 checkpoint 均可严格加载：前融合模型为 315 个 state-dict 键、29,570,945 个参数；双窗口后融合模型为 351 个键、31,940,225 个参数。
 - v3 manifest 只读并校验 schema、样本数与 SHA256，不生成 split 或深度缓存。
 - 训练初始化复现原 DA3 wrapper 和后融合构造链中丢弃模块所消耗的 seed-0 RNG 状态，因此两个模型保留分支的初值均逐位一致。
-- 指标在撤销 letterbox 后的原生图像网格计算，保留 NYUv2 Eigen crop、VOID 官方范围以及 anchor/non-anchor 诊断。
+- Unified6 指标在撤销 letterbox 后的原生图像网格计算，保留 NYUv2 Eigen crop、VOID 官方范围以及 anchor/non-anchor 诊断；KITTI-only 指标按原实验在固定 518×168 网格计算。

@@ -1,4 +1,4 @@
-"""Exact four-GPU trainer for the retained Unified6 depth models."""
+"""Exact four-GPU trainer for the retained Unified6 and KITTI depth runs."""
 from __future__ import annotations
 
 import argparse
@@ -18,7 +18,9 @@ from torch.utils.data import DataLoader, DistributedSampler, SequentialSampler, 
 
 from .data import (
     DOMAIN_NAMES,
+    EXPECTED_KITTI_COUNTS,
     DomainBalancedDistributedSampler,
+    build_kitti_depth_dataset,
     build_unified_depth_dataset,
     build_unified_six_dataset,
     collate_unified_depth_online_knn4,
@@ -29,6 +31,7 @@ from .metrics import best_checkpoint_score, macro_average_domains
 from .model import (
     DPT_PROMPT_CONTRACT,
     DEFAULT_MODEL_VARIANT,
+    KITTI_ONLINE_KNN_CONTRACT,
     MODEL_VARIANTS,
     ONLINE_KNN_CONTRACT,
     SCALE_CONTRACT,
@@ -39,6 +42,7 @@ from .runtime import evaluate_loader, forward_batch, move_to_device
 
 
 EPOCHS = 10
+KITTI_EPOCHS = 20
 LEARNING_RATE = 1.0e-4
 MIN_LEARNING_RATE = 1.0e-6
 WEIGHT_DECAY = 1.0e-4
@@ -52,13 +56,14 @@ NATURAL_SAMPLING_CONTRACT = "natural_concat_distributed_shuffle_full_pass_per_ep
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser(description=__doc__)
     value.add_argument("--da3-checkpoint", required=True)
-    value.add_argument("--manifest-dir", required=True)
-    value.add_argument("--kitti-root", required=True)
-    value.add_argument("--ddad-root", required=True)
-    value.add_argument("--seven-scenes-root", required=True)
-    value.add_argument("--nyuv2-root", required=True)
-    value.add_argument("--sunrgbd-root", required=True)
-    value.add_argument("--void-root", required=True)
+    value.add_argument("--dataset", choices=("unified6", "kitti"), default="unified6")
+    value.add_argument("--manifest-dir")
+    value.add_argument("--kitti-root")
+    value.add_argument("--ddad-root")
+    value.add_argument("--seven-scenes-root")
+    value.add_argument("--nyuv2-root")
+    value.add_argument("--sunrgbd-root")
+    value.add_argument("--void-root")
     value.add_argument("--output-dir", required=True)
     value.add_argument("--resume", default=None)
     value.add_argument(
@@ -77,14 +82,34 @@ def parser() -> argparse.ArgumentParser:
     return value
 
 
+def _validate_paths(args: argparse.Namespace) -> None:
+    required = ["kitti_root"]
+    if args.dataset == "unified6":
+        required.extend(
+            (
+                "manifest_dir",
+                "ddad_root",
+                "seven_scenes_root",
+                "nyuv2_root",
+                "sunrgbd_root",
+                "void_root",
+            )
+        )
+    missing = [f"--{name.replace('_', '-')}" for name in required if not getattr(args, name)]
+    if missing:
+        raise ValueError(f"{args.dataset} training requires {', '.join(missing)}.")
+    if args.dataset == "kitti" and args.sampling != "balanced":
+        raise ValueError("KITTI-only training has one dataset and does not accept --sampling natural.")
+
+
 def _roots(args: argparse.Namespace) -> Dict[str, str]:
     return {
-        "kitti": args.kitti_root,
-        "ddad": args.ddad_root,
-        "7scenes": args.seven_scenes_root,
-        "nyuv2": args.nyuv2_root,
-        "sunrgbd": args.sunrgbd_root,
-        "void": args.void_root,
+        "kitti": str(args.kitti_root),
+        "ddad": str(args.ddad_root),
+        "7scenes": str(args.seven_scenes_root),
+        "nyuv2": str(args.nyuv2_root),
+        "sunrgbd": str(args.sunrgbd_root),
+        "void": str(args.void_root),
     }
 
 
@@ -101,7 +126,9 @@ def _init_distributed() -> tuple[torch.device, int, int, int]:
 
 
 def _fixed_args(args: argparse.Namespace, world: int) -> Dict[str, Any]:
-    spec = get_model_spec(args.model)
+    spec = get_model_spec(args.model, args.dataset)
+    is_kitti = args.dataset == "kitti"
+    epochs = KITTI_EPOCHS if is_kitti else EPOCHS
     sampling_contract = (
         BALANCED_SAMPLING_CONTRACT
         if args.sampling == "balanced"
@@ -111,11 +138,10 @@ def _fixed_args(args: argparse.Namespace, world: int) -> Dict[str, Any]:
         **vars(args),
         "exp": (
             spec.experiment
-            if args.sampling == "balanced"
+            if is_kitti or args.sampling == "balanced"
             else f"{spec.experiment}_natural"
         ),
         "model_variant": spec.variant,
-        "dataset": "unified6",
         "backbone": "da3",
         "da3_model_name": "da3-small",
         "num_frames": 1,
@@ -126,7 +152,7 @@ def _fixed_args(args: argparse.Namespace, world: int) -> Dict[str, Any]:
         "token_dim": 768,
         "batch_size": 1,
         "num_workers": 4,
-        "epochs": EPOCHS,
+        "epochs": epochs,
         "lr": LEARNING_RATE,
         "weight_decay": WEIGHT_DECAY,
         "warmup_epochs": WARMUP_EPOCHS,
@@ -134,25 +160,52 @@ def _fixed_args(args: argparse.Namespace, world: int) -> Dict[str, Any]:
         "amp": "bf16",
         "dense_depth_features": 128,
         "dense_depth_loss_weight": 0.1,
-        "dynamic_image_size": True,
-        "unified_input_long_side": 518,
-        "unified_sparse_points": 500,
-        "unified_samples_per_epoch": 0,
-        "unified_sampling_mode": args.sampling,
-        "unified_sampling_contract": sampling_contract,
-        "fusion_vox_origin": [-60.0, -5.0, 0.0],
-        "fusion_vox_size": [0.4, 0.4, 0.4],
-        "fusion_vox_grid": [300, 25, 300],
+        "dynamic_image_size": None if is_kitti else True,
+        "fusion_vox_origin": None if is_kitti else [-60.0, -5.0, 0.0],
+        "fusion_vox_size": None if is_kitti else [0.4, 0.4, 0.4],
+        "fusion_vox_grid": None if is_kitti else [300, 25, 300],
         "fusion_depth_bin_size": 4.0,
         "seed": 0,
         "world_size": world,
         "model_class": spec.model_class,
         "fusion_contract": spec.fusion_contract,
         "depth_scale_contract": SCALE_CONTRACT,
-        "online_knn_contract": ONLINE_KNN_CONTRACT,
+        "online_knn_contract": (
+            KITTI_ONLINE_KNN_CONTRACT if is_kitti else ONLINE_KNN_CONTRACT
+        ),
         "dpt_prompt_contract": DPT_PROMPT_CONTRACT,
         "initialization_contract": spec.initialization_contract,
     }
+    if is_kitti:
+        fixed.update(
+            {
+                "sampling_mode": "single_dataset_distributed_shuffle",
+                "sampling_contract": "kitti_full_pass_distributed_shuffle_v1",
+                "depth_cache_policy": "forbidden_no_read_no_write_v1",
+                "eval_freq": 1,
+                "save_freq": 2,
+            }
+        )
+        for name in (
+            "unified_input_long_side",
+            "unified_sparse_points",
+            "unified_samples_per_epoch",
+            "unified_sampling_mode",
+            "unified_sampling_contract",
+        ):
+            fixed.pop(name, None)
+    else:
+        fixed.update(
+            {
+                "unified_input_long_side": 518,
+                "unified_sparse_points": 500,
+                "unified_samples_per_epoch": 0,
+                "unified_sampling_mode": args.sampling,
+                "unified_sampling_contract": sampling_contract,
+                "eval_freq": 5,
+                "save_freq": 2,
+            }
+        )
     if args.model == DEFAULT_MODEL_VARIANT:
         fixed["lingbot_da3_voxel_prefusion_contract"] = spec.fusion_contract
     else:
@@ -211,12 +264,12 @@ def _checkpoint_sampling_contract(payload: Dict[str, Any]) -> str | None:
 
 
 def _adjust_learning_rate(
-    optimizer: torch.optim.Optimizer, epoch_fraction: float
+    optimizer: torch.optim.Optimizer, epoch_fraction: float, total_epochs: int = EPOCHS
 ) -> float:
     if epoch_fraction < WARMUP_EPOCHS:
         learning_rate = LEARNING_RATE * epoch_fraction / WARMUP_EPOCHS
     else:
-        progress = (epoch_fraction - WARMUP_EPOCHS) / (EPOCHS - WARMUP_EPOCHS)
+        progress = (epoch_fraction - WARMUP_EPOCHS) / (total_epochs - WARMUP_EPOCHS)
         learning_rate = MIN_LEARNING_RATE + 0.5 * (
             LEARNING_RATE - MIN_LEARNING_RATE
         ) * (1.0 + math.cos(math.pi * progress))
@@ -228,13 +281,27 @@ def _adjust_learning_rate(
 def _validation_loaders(
     args: argparse.Namespace, rank: int, world: int
 ) -> Dict[str, DataLoader]:
+    if args.dataset == "kitti":
+        dataset = build_kitti_depth_dataset(str(args.kitti_root), "val", strict_count=True)
+        shard = Subset(dataset, list(range(rank, len(dataset), world)))
+        return {
+            "kitti": DataLoader(
+                shard,
+                sampler=SequentialSampler(shard),
+                batch_size=1,
+                num_workers=4,
+                pin_memory=True,
+                drop_last=False,
+                collate_fn=collate_unified_depth_online_knn4,
+            )
+        }
     loaders = {}
     for domain, root in _roots(args).items():
         dataset = build_unified_depth_dataset(
             domain,
             root,
             "val",
-            manifest_dir=args.manifest_dir,
+            manifest_dir=str(args.manifest_dir),
             input_long_side=518,
             patch_size=14,
             synthetic_sparse_points=500,
@@ -272,12 +339,16 @@ def _checkpoint_payload(
         "best_macro_abs_rel": best_score,
     }
     if validation is not None:
-        payload["unified6_val_macro"] = macro_average_domains(validation)
+        if fixed_args["dataset"] == "unified6":
+            payload["unified6_val_macro"] = macro_average_domains(validation)
+        else:
+            payload["kitti_val"] = validation["kitti"]
     return payload
 
 
 def main() -> None:
     args = parser().parse_args()
+    _validate_paths(args)
     device, rank, world, local_rank = _init_distributed()
     seed = rank
     random.seed(seed)
@@ -323,39 +394,53 @@ def main() -> None:
                 f"checkpoint={saved_initialization!r}, "
                 f"requested={expected_initialization!r}."
             )
-        saved_contract = _checkpoint_sampling_contract(resume)
-        expected_contract = str(fixed_args["unified_sampling_contract"])
-        if saved_contract is not None and saved_contract != expected_contract:
-            raise RuntimeError(
-                "Cannot resume with a different sampling policy: "
-                f"checkpoint={saved_contract!r}, requested={expected_contract!r}."
-            )
-        if args.sampling == "natural" and saved_contract is None:
-            raise RuntimeError(
-                "A natural-sampling run cannot resume a checkpoint that does not "
-                "record its sampling contract."
-            )
+        if args.dataset == "unified6":
+            saved_contract = _checkpoint_sampling_contract(resume)
+            expected_contract = str(fixed_args["unified_sampling_contract"])
+            if saved_contract is not None and saved_contract != expected_contract:
+                raise RuntimeError(
+                    "Cannot resume with a different sampling policy: "
+                    f"checkpoint={saved_contract!r}, requested={expected_contract!r}."
+                )
+            if args.sampling == "natural" and saved_contract is None:
+                raise RuntimeError(
+                    "A natural-sampling run cannot resume a checkpoint that does not "
+                    "record its sampling contract."
+                )
         ddp.module.load_state_dict(resume["model"], strict=True)
         optimizer.load_state_dict(resume["optimizer"])
         start_epoch = int(resume["epoch"]) + 1
         best_score = float(resume.get("best_macro_abs_rel", float("inf")))
 
-    train_dataset = build_unified_six_dataset(
-        _roots(args),
-        "train",
-        manifest_dir=args.manifest_dir,
-        input_long_side=518,
-        patch_size=14,
-        synthetic_sparse_points=500,
-        sampling_seed=0,
-        strict_count=True,
-    )
-    sampler = build_training_sampler(
-        train_dataset,
-        sampling=args.sampling,
-        rank=rank,
-        world=world,
-    )
+    if args.dataset == "kitti":
+        train_dataset = build_kitti_depth_dataset(
+            str(args.kitti_root), "train", strict_count=True
+        )
+        sampler = DistributedSampler(
+            train_dataset,
+            num_replicas=world,
+            rank=rank,
+            shuffle=True,
+            seed=0,
+            drop_last=False,
+        )
+    else:
+        train_dataset = build_unified_six_dataset(
+            _roots(args),
+            "train",
+            manifest_dir=str(args.manifest_dir),
+            input_long_side=518,
+            patch_size=14,
+            synthetic_sparse_points=500,
+            sampling_seed=0,
+            strict_count=True,
+        )
+        sampler = build_training_sampler(
+            train_dataset,
+            sampling=args.sampling,
+            rank=rank,
+            world=world,
+        )
     train_loader = DataLoader(
         train_dataset,
         sampler=sampler,
@@ -368,6 +453,41 @@ def main() -> None:
     validation_loaders = None if args.smoke_steps else _validation_loaders(args, rank, world)
 
     if rank == 0:
+        if args.dataset == "kitti":
+            data_config = {
+                "train_samples": len(train_dataset),
+                "validation_samples": EXPECTED_KITTI_COUNTS["val"],
+                "sampling_mode": "single_dataset_distributed_shuffle",
+                "sampling_contract": fixed_args["sampling_contract"],
+                "logical_samples_per_epoch": len(train_dataset),
+                "samples_per_rank": len(sampler),
+            }
+        else:
+            data_config = {
+                "train_samples": len(train_dataset),
+                "sampling_mode": args.sampling,
+                "sampling_contract": fixed_args["unified_sampling_contract"],
+                "domain_samples_per_epoch": (
+                    {
+                        name: sampler.samples_per_domain
+                        for name in train_dataset.domain_names  # type: ignore[attr-defined]
+                    }
+                    if isinstance(sampler, DomainBalancedDistributedSampler)
+                    else {
+                        name: len(domain_dataset)
+                        for name, domain_dataset in zip(
+                            train_dataset.domain_names,  # type: ignore[attr-defined]
+                            train_dataset.datasets,  # type: ignore[attr-defined]
+                        )
+                    }
+                ),
+                "logical_samples_per_epoch": (
+                    sampler.logical_samples_per_epoch
+                    if isinstance(sampler, DomainBalancedDistributedSampler)
+                    else len(train_dataset)
+                ),
+                "samples_per_rank": len(sampler),
+            }
         config = {
             "args": fixed_args,
             "model": {
@@ -380,37 +500,16 @@ def main() -> None:
                     if parameter.requires_grad
                 ),
             },
-            "data": {
-                "train_samples": len(train_dataset),
-                "sampling_mode": args.sampling,
-                "sampling_contract": fixed_args["unified_sampling_contract"],
-                "domain_samples_per_epoch": (
-                    {
-                        name: sampler.samples_per_domain
-                        for name in train_dataset.domain_names
-                    }
-                    if isinstance(sampler, DomainBalancedDistributedSampler)
-                    else {
-                        name: len(domain_dataset)
-                        for name, domain_dataset in zip(
-                            train_dataset.domain_names, train_dataset.datasets
-                        )
-                    }
-                ),
-                "logical_samples_per_epoch": (
-                    sampler.logical_samples_per_epoch
-                    if isinstance(sampler, DomainBalancedDistributedSampler)
-                    else len(train_dataset)
-                ),
-                "samples_per_rank": len(sampler),
-            },
+            "data": data_config,
         }
         (output_dir / "training_config.json").write_text(
             json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
 
     total_steps = 0
-    for epoch in range(start_epoch, EPOCHS):
+    total_epochs = int(fixed_args["epochs"])
+    eval_frequency = int(fixed_args["eval_freq"])
+    for epoch in range(start_epoch, total_epochs):
         sampler.set_epoch(epoch)
         ddp.train()
         loss_sum = torch.zeros((), device=device)
@@ -418,7 +517,9 @@ def main() -> None:
         started = time.time()
         for step, batch in enumerate(train_loader):
             learning_rate = _adjust_learning_rate(
-                optimizer, epoch + step / max(len(train_loader), 1)
+                optimizer,
+                epoch + step / max(len(train_loader), 1),
+                total_epochs,
             )
             optimizer.zero_grad(set_to_none=True)
             with torch.autocast("cuda", dtype=torch.bfloat16):
@@ -465,7 +566,7 @@ def main() -> None:
 
         validation = None
         is_best = False
-        if (epoch + 1) % 5 == 0:
+        if (epoch + 1) % eval_frequency == 0:
             assert validation_loaders is not None
             validation = {
                 domain: evaluate_loader(
@@ -477,7 +578,11 @@ def main() -> None:
                 )
                 for domain, loader in validation_loaders.items()
             }
-            current = best_checkpoint_score(validation)
+            current = (
+                best_checkpoint_score(validation)
+                if args.dataset == "unified6"
+                else float(validation["kitti"]["pixel_micro"]["all_valid"]["abs_rel"])
+            )
             is_best = current < best_score
             best_score = min(best_score, current)
             if rank == 0:
@@ -492,19 +597,26 @@ def main() -> None:
                         "prediction_mode": "relative_online_knn_minmax",
                         "depth_scale_contract": SCALE_CONTRACT,
                         "requested_split": "val",
-                        "dataset_splits": {name: "val" for name in DOMAIN_NAMES},
+                        "dataset_splits": {
+                            name: "val" for name in validation
+                        },
                         "datasets": validation,
                         "cross_domain_macro": macro,
                         "best_checkpoint_score_abs_rel": current,
                     },
-                    output_dir / f"eval_unified_epoch{epoch}.json",
+                    output_dir
+                    / (
+                        f"eval_unified_epoch{epoch}.json"
+                        if args.dataset == "unified6"
+                        else f"eval_depth_epoch{epoch}.json"
+                    ),
                 )
 
         if rank == 0:
             payload = _checkpoint_payload(
                 ddp.module, optimizer, epoch, fixed_args, best_score, validation
             )
-            if (epoch + 1) % 2 == 0 or validation is not None or epoch + 1 == EPOCHS:
+            if (epoch + 1) % 2 == 0 or validation is not None or epoch + 1 == total_epochs:
                 torch.save(payload, output_dir / "checkpoint-last.pth")
             if (epoch + 1) % 5 == 0:
                 torch.save(

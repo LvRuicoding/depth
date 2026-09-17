@@ -59,6 +59,12 @@ EXPECTED_SPLIT_COUNTS: Mapping[str, Mapping[str, int]] = {
     "void": {"train": 48259, "val": 800},
 }
 
+KITTI_SPLITS: Mapping[str, Tuple[str, ...]] = {
+    "train": ("00", "01", "02", "03", "04", "05", "06", "07", "09", "10"),
+    "val": ("08",),
+}
+EXPECTED_KITTI_COUNTS: Mapping[str, int] = {"train": 3834, "val": 815}
+
 DEPTH_RANGES: Mapping[str, Tuple[float, float]] = {
     "kitti": (1.0e-3, 80.0),
     "ddad": (1.0e-3, 120.0),
@@ -644,6 +650,244 @@ def _kitti_cam2_from_velo(calib: Mapping[str, np.ndarray]) -> np.ndarray:
     rectified = np.eye(4, dtype=np.float64)
     rectified[:3, 3] = np.linalg.inv(projection[:, :3]) @ projection[:, 3]
     return (rectified @ calib["Tr"]).astype(np.float32)
+
+
+def _kitti_velo_from_cam2(calib: Mapping[str, np.ndarray]) -> np.ndarray:
+    projection = calib["P2"]
+    cam2_from_cam0 = np.eye(4, dtype=np.float64)
+    cam2_from_cam0[:3, 3] = np.linalg.inv(projection[:, :3]) @ projection[:, 3]
+    return (
+        np.linalg.inv(calib["Tr"]) @ np.linalg.inv(cam2_from_cam0)
+    ).astype(np.float32)
+
+
+def crop_resize_kitti(
+    image: np.ndarray,
+    depth: np.ndarray,
+    intrinsics: np.ndarray,
+    output_resolution: Tuple[int, int] = (518, 168),
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Reproduce the fixed KITTI principal-point crop used by the source run."""
+    import cv2
+
+    rgb = Image.fromarray(np.asarray(image, dtype=np.uint8))
+    depth_out = np.asarray(depth, dtype=np.float32)
+    K = np.asarray(intrinsics, dtype=np.float64).copy()
+    width, height = rgb.size
+    cx, cy = K[:2, 2].round().astype(int)
+    margin_x = min(cx, width - cx)
+    margin_y = min(cy, height - cy)
+    if margin_x <= width / 5 or margin_y <= height / 5:
+        raise RuntimeError(
+            f"Bad KITTI principal point {(float(K[0, 2]), float(K[1, 2]))} "
+            f"for image {(width, height)}."
+        )
+
+    left, top = int(cx - margin_x), int(cy - margin_y)
+    right, bottom = int(cx + margin_x), int(cy + margin_y)
+    rgb = rgb.crop((left, top, right, bottom))
+    depth_out = depth_out[top:bottom, left:right]
+    K[0, 2] -= left
+    K[1, 2] -= top
+
+    target = np.asarray(output_resolution, dtype=np.int64)
+    input_size = np.asarray(rgb.size, dtype=np.int64)
+    scale = float(np.max(target / input_size) + 1.0e-8)
+    scaled_size = np.floor(input_size * scale).astype(np.int64)
+    resample = Image.Resampling.LANCZOS if scale < 1.0 else Image.Resampling.BICUBIC
+    rgb = rgb.resize(tuple(int(value) for value in scaled_size), resample=resample)
+    depth_out = cv2.resize(
+        depth_out,
+        tuple(int(value) for value in scaled_size),
+        fx=scale,
+        fy=scale,
+        interpolation=cv2.INTER_NEAREST,
+    )
+
+    # This is the exact OpenCV/Colmap half-pixel convention used by the
+    # original dust3r cropping helper.
+    margins = input_size * scale - scaled_size
+    K[:2, 2] += 0.5
+    K[:2, :] *= scale
+    K[:2, 2] -= 0.5 * margins
+    K[:2, 2] -= 0.5
+
+    scaled_size = np.asarray(rgb.size, dtype=np.int64)
+    crop_margins = scaled_size - target
+    crop_K = K.copy()
+    crop_K[:2, 2] += 0.5
+    crop_K[:2, 2] -= 0.5 * crop_margins
+    crop_K[:2, 2] -= 0.5
+    crop_left, crop_top = np.round(K[:2, 2] - crop_K[:2, 2]).astype(np.int32)
+    crop_right = int(crop_left + target[0])
+    crop_bottom = int(crop_top + target[1])
+    rgb = rgb.crop((int(crop_left), int(crop_top), crop_right, crop_bottom))
+    depth_out = depth_out[int(crop_top):crop_bottom, int(crop_left):crop_right]
+    K = crop_K
+
+    image_out = np.asarray(rgb, dtype=np.uint8)
+    expected_shape = (int(target[1]), int(target[0]))
+    if image_out.shape[:2] != expected_shape or depth_out.shape != expected_shape:
+        raise RuntimeError(
+            f"KITTI crop produced image/depth {image_out.shape[:2]}/{depth_out.shape}, "
+            f"expected {expected_shape}."
+        )
+    return image_out, np.asarray(depth_out, dtype=np.float32), K.astype(np.float32)
+
+
+def _kitti_grid_tensors() -> Dict[str, torch.Tensor]:
+    return {
+        "grid_size": torch.tensor((256, 256, 32), dtype=torch.long),
+        "voxel_origin": torch.tensor((0.0, -25.6, -2.0), dtype=torch.float32),
+        "voxel_size": torch.tensor((0.2, 0.2, 0.2), dtype=torch.float32),
+        "half_grid_size": torch.tensor((128, 128, 16), dtype=torch.long),
+        "half_voxel_origin": torch.tensor((0.0, -25.6, -2.0), dtype=torch.float32),
+        "half_voxel_size": torch.tensor((0.4, 0.4, 0.4), dtype=torch.float32),
+        "fusion_vox_origin": torch.tensor((-25.6, -2.0, 0.0), dtype=torch.float32),
+        "fusion_vox_size": torch.tensor((0.4, 0.4, 0.4), dtype=torch.float32),
+        "fusion_vox_grid": torch.tensor((128, 16, 128), dtype=torch.long),
+    }
+
+
+class KITTISingleFrameDepthDataset(Dataset):
+    """Original KITTI-only 518x168 train/validation protocol (no manifest)."""
+
+    dataset_name = "kitti"
+
+    def __init__(
+        self,
+        processed_root: str,
+        split: str = "train",
+        *,
+        strict_count: bool = True,
+        output_resolution: Tuple[int, int] = (518, 168),
+    ) -> None:
+        super().__init__()
+        if split not in KITTI_SPLITS:
+            raise ValueError(f"KITTI split must be train or val, got {split!r}.")
+        self.root = Path(processed_root).expanduser().resolve()
+        self.split = split
+        self.output_resolution = tuple(int(value) for value in output_resolution)
+        self.samples: List[Tuple[str, int]] = []
+        self._calibration: Dict[str, Dict[str, np.ndarray]] = {}
+        for sequence in KITTI_SPLITS[split]:
+            sequence_dir = self._sequence_dir(sequence)
+            voxel_dir = sequence_dir / "voxels"
+            if not voxel_dir.is_dir():
+                continue
+            # Fail during construction, matching the source dataset contract.
+            self._calibration[sequence] = _parse_kitti_calib(sequence_dir / "calib.txt")
+            for voxel_path in sorted(voxel_dir.glob("*.npz")):
+                frame = int(voxel_path.stem)
+                if (sequence_dir / f"{frame:06d}_0.npz").is_file():
+                    self.samples.append((sequence, frame))
+        expected = EXPECTED_KITTI_COUNTS[split]
+        if strict_count and len(self.samples) != expected:
+            raise RuntimeError(
+                f"KITTI {split} contains {len(self.samples)} samples; expected {expected}."
+            )
+
+    def _sequence_dir(self, sequence: str) -> Path:
+        source = "train" if sequence in KITTI_SPLITS["train"] else "val"
+        return self.root / f"{source}_{sequence}"
+
+    def __len__(self) -> int:
+        return len(self.samples)
+
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        sequence, frame = self.samples[index]
+        sequence_dir = self._sequence_dir(sequence)
+        frame_path = sequence_dir / f"{frame:06d}_0.npz"
+        with np.load(frame_path) as npz:
+            image = np.asarray(npz["image"])
+            intrinsics = np.asarray(npz["intrinsics"], dtype=np.float64)
+            cam2world = np.asarray(npz["cam2world"], dtype=np.float32)
+            if "dense_depthmap" in npz.files:
+                dense_native = np.asarray(npz["dense_depthmap"], dtype=np.float32)
+                has_depth = bool(
+                    np.isfinite(dense_native).any() and np.any(dense_native > 0.0)
+                )
+            else:
+                dense_native = np.zeros(image.shape[:2], dtype=np.float32)
+                has_depth = False
+        image, dense_depth, K = crop_resize_kitti(
+            image, dense_native, intrinsics, self.output_resolution
+        )
+        finite_positive = np.isfinite(dense_depth) & (dense_depth > 0.0)
+        if not bool(finite_positive.any()):
+            has_depth = False
+            dense_depth = np.zeros_like(dense_depth, dtype=np.float32)
+        else:
+            dense_depth = np.where(finite_positive, dense_depth, 0.0).astype(np.float32)
+
+        transform = _kitti_cam2_from_velo(self._calibration[sequence])
+        points = np.fromfile(
+            sequence_dir / "lidar" / f"{frame:06d}.bin", dtype=np.float32
+        ).reshape(-1, 4)
+        sparse_depth, sparse_mask = project_points_to_sparse_depth(
+            points, transform, K, (image.shape[0], image.shape[1])
+        )
+        valid = finite_positive & (dense_depth >= 1.0e-3) & (dense_depth <= 80.0)
+        sample_id = f"kitti:{sequence}:{frame}"
+        height, width = image.shape[:2]
+        view = {
+            "img": _normalize_rgb(image),
+            "true_shape": np.asarray((height, width), dtype=np.int32),
+            "camera_pose": np.eye(4, dtype=np.float32),
+            "camera_intrinsics": K,
+            "cam2world": cam2world,
+            "timestep": 0,
+            "is_raymap": False,
+            "is_metric_scale": True,
+            "frame_id": int(frame),
+            "label": f"{sequence}_{frame:06d}_cam0",
+            "camera_name": "image_02",
+            "image_pixel_mask": torch.ones((height, width), dtype=torch.bool),
+        }
+        grid = _kitti_grid_tensors()
+        return {
+            "views": [view],
+            "voxel_label": torch.zeros((1, 1, 1), dtype=torch.long),
+            "T_target_from_refcam": torch.from_numpy(
+                _kitti_velo_from_cam2(self._calibration[sequence])
+            ),
+            **grid,
+            "dense_depth": torch.from_numpy(dense_depth[None]),
+            "dense_depth_pixel_mask": torch.from_numpy(valid[None].copy()),
+            "dense_depth_frame_mask": torch.tensor([has_depth], dtype=torch.bool),
+            "sparse_depth": torch.from_numpy(sparse_depth[None]),
+            "sparse_depth_mask": torch.from_numpy(sparse_mask[None].copy()),
+            "points_per_frame": [torch.from_numpy(np.ascontiguousarray(points))],
+            "T_cam_from_velo": torch.from_numpy(transform),
+            "K_per_frame": torch.from_numpy(K[None]),
+            "image_hw": torch.tensor((height, width), dtype=torch.int32),
+            # KITTI-only metrics intentionally remain on the fixed 518x168 grid.
+            "native_dense_depth": torch.from_numpy(dense_depth),
+            "native_valid_mask": torch.from_numpy(valid.copy()),
+            "native_sparse_depth": torch.from_numpy(sparse_depth),
+            "native_sparse_depth_mask": torch.from_numpy(sparse_mask.copy()),
+            "resize_metadata": None,
+            "depth_range": torch.tensor((1.0e-3, 80.0), dtype=torch.float32),
+            "dataset_name": "kitti",
+            "sample_id": sample_id,
+            "sequence": sequence,
+            "target_frame_id": int(frame),
+            "frame_ids": (int(frame),),
+            "camera_indices": (0,),
+            "camera_names": ("image_02",),
+            "num_frames": 1,
+            "num_views": 1,
+            "view_layout": "kitti_single_frame",
+        }
+
+
+def build_kitti_depth_dataset(
+    root: str,
+    split: str,
+    *,
+    strict_count: bool = True,
+) -> KITTISingleFrameDepthDataset:
+    return KITTISingleFrameDepthDataset(root, split, strict_count=strict_count)
 
 
 class KITTISingleFrameUnifiedDepthDataset(_UnifiedDepthBase):
@@ -1320,6 +1564,11 @@ __all__ = [
     "project_points_to_sparse_depth",
     "decode_sunrgbd_depth",
     "load_split_manifest",
+    "KITTI_SPLITS",
+    "EXPECTED_KITTI_COUNTS",
+    "crop_resize_kitti",
+    "KITTISingleFrameDepthDataset",
+    "build_kitti_depth_dataset",
     "KITTISingleFrameUnifiedDepthDataset",
     "DDADCamera01UnifiedDepthDataset",
     "SevenScenesUnifiedDepthDataset",
