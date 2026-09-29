@@ -29,12 +29,10 @@ from .depth_head import dense_metric_depth_loss
 from .eval import write_results
 from .metrics import best_checkpoint_score, macro_average_domains
 from .model import (
-    DPT_PROMPT_CONTRACT,
     DEFAULT_MODEL_VARIANT,
-    KITTI_ONLINE_KNN_CONTRACT,
+    DA3_BASE_MODEL_VARIANTS,
     MODEL_VARIANTS,
-    ONLINE_KNN_CONTRACT,
-    SCALE_CONTRACT,
+    POSTFUSION_MODEL_VARIANT,
     build_model,
     get_model_spec,
 )
@@ -83,6 +81,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def _validate_paths(args: argparse.Namespace) -> None:
+    get_model_spec(args.model, args.dataset)
     required = ["kitti_root"]
     if args.dataset == "unified6":
         required.extend(
@@ -143,13 +142,13 @@ def _fixed_args(args: argparse.Namespace, world: int) -> Dict[str, Any]:
         ),
         "model_variant": spec.variant,
         "backbone": "da3",
-        "da3_model_name": "da3-small",
+        "da3_model_name": spec.da3_model_name,
         "num_frames": 1,
         "num_views": 1,
         "width": 518,
         "height": 168,
         "patch_size": 14,
-        "token_dim": 768,
+        "token_dim": spec.token_dim,
         "batch_size": 1,
         "num_workers": 4,
         "epochs": epochs,
@@ -169,11 +168,10 @@ def _fixed_args(args: argparse.Namespace, world: int) -> Dict[str, Any]:
         "world_size": world,
         "model_class": spec.model_class,
         "fusion_contract": spec.fusion_contract,
-        "depth_scale_contract": SCALE_CONTRACT,
-        "online_knn_contract": (
-            KITTI_ONLINE_KNN_CONTRACT if is_kitti else ONLINE_KNN_CONTRACT
-        ),
-        "dpt_prompt_contract": DPT_PROMPT_CONTRACT,
+        "prediction_mode": spec.prediction_mode,
+        "depth_scale_contract": spec.depth_scale_contract,
+        "online_knn_contract": spec.online_knn_contract,
+        "dpt_prompt_contract": spec.dpt_prompt_contract,
         "initialization_contract": spec.initialization_contract,
     }
     if is_kitti:
@@ -208,10 +206,18 @@ def _fixed_args(args: argparse.Namespace, world: int) -> Dict[str, Any]:
         )
     if args.model == DEFAULT_MODEL_VARIANT:
         fixed["lingbot_da3_voxel_prefusion_contract"] = spec.fusion_contract
-    else:
+    elif args.model == POSTFUSION_MODEL_VARIANT:
         fixed["patch_depth4m_voxeldepth_dualwindow_contract"] = spec.fusion_contract
         fixed["depth_token_source"] = "sparse_log_patch"
         fixed["voxel_token_source"] = "patch_depth4m"
+    elif args.model in DA3_BASE_MODEL_VARIANTS:
+        fixed["da3_base_token_fusion_contract"] = spec.fusion_contract
+        fixed["depth_token_source"] = (
+            "sparse_log_patch" if spec.uses_depth_tokens else None
+        )
+        fixed["voxel_token_source"] = (
+            "patch_depth4m" if spec.uses_voxel_tokens else None
+        )
     return fixed
 
 
@@ -381,18 +387,23 @@ def main() -> None:
     start_epoch, best_score = 0, float("inf")
     if args.resume:
         resume = torch.load(args.resume, map_location="cpu", weights_only=False)
-        saved_initialization = _checkpoint_args(resume).get(
-            "initialization_contract"
-        )
-        expected_initialization = fixed_args["initialization_contract"]
-        if (
-            saved_initialization is not None
-            and saved_initialization != expected_initialization
+        saved_args = _checkpoint_args(resume)
+        mismatches = []
+        for name in (
+            "exp",
+            "model_variant",
+            "da3_model_name",
+            "token_dim",
+            "initialization_contract",
         ):
+            saved = saved_args.get(name)
+            expected = fixed_args[name]
+            if saved is not None and saved != expected:
+                mismatches.append(f"{name}={saved!r}, expected {expected!r}")
+        if mismatches:
             raise RuntimeError(
                 "Cannot resume with a different model architecture: "
-                f"checkpoint={saved_initialization!r}, "
-                f"requested={expected_initialization!r}."
+                + "; ".join(mismatches)
             )
         if args.dataset == "unified6":
             saved_contract = _checkpoint_sampling_contract(resume)
@@ -594,8 +605,8 @@ def main() -> None:
                         "weights": str(output_dir / "checkpoint-best.pth"),
                         "zero_shot": False,
                         "experiment": fixed_args["exp"],
-                        "prediction_mode": "relative_online_knn_minmax",
-                        "depth_scale_contract": SCALE_CONTRACT,
+                        "prediction_mode": fixed_args["prediction_mode"],
+                        "depth_scale_contract": fixed_args["depth_scale_contract"],
                         "requested_split": "val",
                         "dataset_splits": {
                             name: "val" for name in validation

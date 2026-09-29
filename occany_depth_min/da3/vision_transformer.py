@@ -13,9 +13,15 @@ from .layers import Block, Mlp, PatchEmbed, PositionGetter, RotaryPositionEmbedd
 
 
 class DinoVisionTransformer(nn.Module):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        embed_dim: int = 384,
+        depth: int = 12,
+        num_heads: int = 6,
+    ) -> None:
         super().__init__()
-        embed_dim, depth, num_heads = 384, 12, 6
+        embed_dim, depth, num_heads = int(embed_dim), int(depth), int(num_heads)
         self.patch_start_idx = 1
         self.num_features = self.embed_dim = embed_dim
         self.alt_start = self.qknorm_start = self.rope_start = 4
@@ -129,3 +135,7 @@ class DinoVisionTransformer(nn.Module):
 
 def vit_small() -> DinoVisionTransformer:
     return DinoVisionTransformer()
+
+
+def vit_base() -> DinoVisionTransformer:
+    return DinoVisionTransformer(embed_dim=768, depth=12, num_heads=12)

@@ -20,12 +20,8 @@ from .data import (
 )
 from .metrics import best_checkpoint_score, macro_average_domains
 from .model import (
-    DPT_PROMPT_CONTRACT,
     DEFAULT_MODEL_VARIANT,
-    KITTI_ONLINE_KNN_CONTRACT,
     MODEL_VARIANTS,
-    ONLINE_KNN_CONTRACT,
-    SCALE_CONTRACT,
     build_model,
     get_model_spec,
     load_trained_checkpoint,
@@ -56,7 +52,7 @@ def write_results(payload: Mapping[str, Any], output_json: str | Path) -> None:
             "weights": safe["weights"],
             "zero_shot": False,
             "experiment": safe["experiment"],
-            "prediction_mode": "relative_online_knn_minmax",
+            "prediction_mode": safe["prediction_mode"],
             "depth_scale_contract": safe["depth_scale_contract"],
             "split": "val",
             "dataset": result,
@@ -111,6 +107,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 def _validate_paths(args: argparse.Namespace) -> None:
+    get_model_spec(args.model, args.dataset)
     required = ["kitti_root"]
     if args.dataset == "unified6":
         required.extend(
@@ -205,14 +202,10 @@ def main() -> None:
             "experiment": spec.experiment,
             "model_variant": spec.variant,
             "model_class": spec.model_class,
-            "prediction_mode": "relative_online_knn_minmax",
-            "depth_scale_contract": SCALE_CONTRACT,
-            "online_knn_contract": (
-                KITTI_ONLINE_KNN_CONTRACT
-                if args.dataset == "kitti"
-                else ONLINE_KNN_CONTRACT
-            ),
-            "dpt_prompt_contract": DPT_PROMPT_CONTRACT,
+            "prediction_mode": spec.prediction_mode,
+            "depth_scale_contract": spec.depth_scale_contract,
+            "online_knn_contract": spec.online_knn_contract,
+            "dpt_prompt_contract": spec.dpt_prompt_contract,
             "initialization_contract": spec.initialization_contract,
             "requested_split": "val",
             "dataset_splits": {name: "val" for name in domains},

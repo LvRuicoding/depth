@@ -1,4 +1,4 @@
-"""Exact target model: DA3-small + sparse-depth/voxel pre-fusion + PromptDA."""
+"""Retained DA3-small models and DA3-Base KITTI token-fusion variants."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -8,9 +8,12 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch import nn
 
-from .da3 import vit_small
+from .da3 import vit_base, vit_small
 from .depth_head import SingleScaleDPTDepthHead
-from .initialization import restore_reference_head_rng_state
+from .initialization import (
+    restore_da3_base_head_rng_state,
+    restore_reference_head_rng_state,
+)
 from .projection import projected_lidar_sparse_depth
 from .voxel_encoder import PatchDepthBinFeatureEncoder
 
@@ -38,7 +41,22 @@ INITIALIZATION_CONTRACT = (
 )
 DEFAULT_MODEL_VARIANT = "prefusion"
 POSTFUSION_MODEL_VARIANT = "postfusion"
-MODEL_VARIANTS = (DEFAULT_MODEL_VARIANT, POSTFUSION_MODEL_VARIANT)
+DA3_BASE_MODEL_VARIANTS = (
+    "image",
+    "depth",
+    "voxel",
+    "voxel_depth",
+    "image_scaled",
+    "depth_scaled",
+    "voxel_scaled",
+    "voxel_depth_scaled",
+)
+MODEL_VARIANTS = (
+    DEFAULT_MODEL_VARIANT,
+    POSTFUSION_MODEL_VARIANT,
+    *DA3_BASE_MODEL_VARIANTS,
+)
+DIRECT_SCALE_CONTRACT = "direct_softplus_metric_v1"
 
 
 @dataclass(frozen=True)
@@ -48,6 +66,16 @@ class ModelSpec:
     experiment: str
     fusion_contract: str
     initialization_contract: str
+    da3_model_name: str = "da3-small"
+    native_dim: int = 384
+    token_dim: int = 768
+    uses_depth_tokens: bool = True
+    uses_voxel_tokens: bool = True
+    scaled: bool = True
+    prediction_mode: str = "relative_online_knn_minmax"
+    depth_scale_contract: str = SCALE_CONTRACT
+    online_knn_contract: Optional[str] = ONLINE_KNN_CONTRACT
+    dpt_prompt_contract: Optional[str] = DPT_PROMPT_CONTRACT
 
 
 MODEL_SPECS = {
@@ -94,6 +122,7 @@ KITTI_MODEL_SPECS = {
         initialization_contract=(
             "da3_small_only_random_lingbot_voxel_promptda_last_kitti_v1"
         ),
+        online_knn_contract=KITTI_ONLINE_KNN_CONTRACT,
     ),
     POSTFUSION_MODEL_VARIANT: ModelSpec(
         variant=POSTFUSION_MODEL_VARIANT,
@@ -113,49 +142,229 @@ KITTI_MODEL_SPECS = {
             "da3_small_only_seeded_logdepth_patchdepth4m_voxel_dualwindow_"
             "promptda_dpt_online_knn_scaled_kitti_v1"
         ),
+        online_knn_contract=KITTI_ONLINE_KNN_CONTRACT,
+    ),
+    "image": ModelSpec(
+        variant="image",
+        model_class=(
+            "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusion"
+            "RGBOnlyDirectMetricModel"
+        ),
+        experiment=(
+            "depth_lingbot_da3_last_patchdepth4m_voxel_prefusion_"
+            "rgb_only_direct_metric"
+        ),
+        fusion_contract=(
+            "da3_rgb_only_no_depth_no_voxel_token_layer11_softplus_metric_v1"
+        ),
+        initialization_contract="da3_base_rgb_only_direct_metric_kitti_v1",
+        da3_model_name="da3-base",
+        native_dim=768,
+        token_dim=1536,
+        uses_depth_tokens=False,
+        uses_voxel_tokens=False,
+        scaled=False,
+        prediction_mode="direct_metric",
+        depth_scale_contract=DIRECT_SCALE_CONTRACT,
+        online_knn_contract=None,
+        dpt_prompt_contract=None,
+    ),
+    "depth": ModelSpec(
+        variant="depth",
+        model_class="Stage1DepthLingBotDA3LastDirectMetricModel",
+        experiment="depth_lingbot_da3_last_direct_metric",
+        fusion_contract=(
+            "lingbot_sparse_log_cat_token_da3_rgb0_depth1_"
+            "layer11_softplus_metric_v1"
+        ),
+        initialization_contract="da3_base_depth_direct_metric_kitti_v1",
+        da3_model_name="da3-base",
+        native_dim=768,
+        token_dim=1536,
+        uses_voxel_tokens=False,
+        scaled=False,
+        prediction_mode="direct_metric",
+        depth_scale_contract=DIRECT_SCALE_CONTRACT,
+        online_knn_contract=None,
+        dpt_prompt_contract=None,
+    ),
+    "voxel": ModelSpec(
+        variant="voxel",
+        model_class=(
+            "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusion"
+            "RGBVoxelDirectMetricModel"
+        ),
+        experiment=(
+            "depth_lingbot_da3_last_patchdepth4m_voxel_prefusion_"
+            "rgbvoxel_direct_metric"
+        ),
+        fusion_contract=(
+            "patchdepth4m_voxel_cat_token_da3_rgb0_voxel2_no_depth_token_"
+            "layer11_softplus_metric_v1"
+        ),
+        initialization_contract="da3_base_rgbvoxel_direct_metric_kitti_v1",
+        da3_model_name="da3-base",
+        native_dim=768,
+        token_dim=1536,
+        uses_depth_tokens=False,
+        scaled=False,
+        prediction_mode="direct_metric",
+        depth_scale_contract=DIRECT_SCALE_CONTRACT,
+        online_knn_contract=None,
+        dpt_prompt_contract=None,
+    ),
+    "voxel_depth": ModelSpec(
+        variant="voxel_depth",
+        model_class=(
+            "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionDirectMetricModel"
+        ),
+        experiment=(
+            "depth_lingbot_da3_last_patchdepth4m_voxel_prefusion_direct_metric"
+        ),
+        fusion_contract=(
+            "lingbot_sparse_log_cat_patchdepth4m_voxel_cat_token_da3_"
+            "rgb0_depth1_voxel2_layer11_softplus_metric_v1"
+        ),
+        initialization_contract="da3_base_depth_voxel_direct_metric_kitti_v1",
+        da3_model_name="da3-base",
+        native_dim=768,
+        token_dim=1536,
+        scaled=False,
+        prediction_mode="direct_metric",
+        depth_scale_contract=DIRECT_SCALE_CONTRACT,
+        online_knn_contract=None,
+        dpt_prompt_contract=None,
+    ),
+    "image_scaled": ModelSpec(
+        variant="image_scaled",
+        model_class="DA3BaseRGBOnlyOnlineKNNPromptDAScaledKITTIModel",
+        experiment="depth_lingbot_da3_last_rgb_only_promptda_scaled_kitti",
+        fusion_contract=(
+            "da3_rgb_only_no_depth_no_voxel_token_layer11_promptda_scaled_v1"
+        ),
+        initialization_contract=(
+            "da3_base_only_random_lingbot_rgb_only_promptda_last_kitti_v1"
+        ),
+        da3_model_name="da3-base",
+        native_dim=768,
+        token_dim=1536,
+        uses_depth_tokens=False,
+        uses_voxel_tokens=False,
+        online_knn_contract=KITTI_ONLINE_KNN_CONTRACT,
+    ),
+    "depth_scaled": ModelSpec(
+        variant="depth_scaled",
+        model_class=(
+            "Stage1DepthLingBotDA3LastDepthImageOnlineKNN"
+            "PromptDAScaledUnified6Model"
+        ),
+        experiment="depth_lingbot_da3_last_promptda_scaled_kitti",
+        fusion_contract=(
+            "lingbot_sparse_log_cat_token_da3_rgb0_depth1_"
+            "layer11_softplus_metric_v1"
+        ),
+        initialization_contract=(
+            "da3_base_only_random_lingbot_promptda_last_kitti_v1"
+        ),
+        da3_model_name="da3-base",
+        native_dim=768,
+        token_dim=1536,
+        uses_voxel_tokens=False,
+        online_knn_contract=KITTI_ONLINE_KNN_CONTRACT,
+    ),
+    "voxel_scaled": ModelSpec(
+        variant="voxel_scaled",
+        model_class=(
+            "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionRGBVoxel"
+            "OnlineKNNPromptDAScaledUnified6Model"
+        ),
+        experiment=(
+            "depth_lingbot_da3_last_patchdepth4m_voxel_prefusion_"
+            "rgbvoxel_promptda_scaled_kitti"
+        ),
+        fusion_contract=(
+            "patchdepth4m_voxel_cat_token_da3_rgb0_voxel2_no_depth_token_"
+            "layer11_softplus_metric_v1"
+        ),
+        initialization_contract=(
+            "da3_base_only_random_lingbot_rgbvoxel_promptda_last_kitti_v1"
+        ),
+        da3_model_name="da3-base",
+        native_dim=768,
+        token_dim=1536,
+        uses_depth_tokens=False,
+        online_knn_contract=KITTI_ONLINE_KNN_CONTRACT,
+    ),
+    "voxel_depth_scaled": ModelSpec(
+        variant="voxel_depth_scaled",
+        model_class=(
+            "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionOnlineKNN"
+            "PromptDAScaledUnified6Model"
+        ),
+        experiment=(
+            "depth_lingbot_da3_last_patchdepth4m_voxel_prefusion_"
+            "promptda_scaled_kitti"
+        ),
+        fusion_contract=(
+            "lingbot_sparse_log_cat_patchdepth4m_voxel_cat_token_da3_"
+            "rgb0_depth1_voxel2_layer11_softplus_metric_v1"
+        ),
+        initialization_contract=(
+            "da3_base_only_random_lingbot_voxel_promptda_last_kitti_v1"
+        ),
+        da3_model_name="da3-base",
+        native_dim=768,
+        token_dim=1536,
+        online_knn_contract=KITTI_ONLINE_KNN_CONTRACT,
     ),
 }
 
 
 def get_model_spec(variant: str, dataset: str = "unified6") -> ModelSpec:
-    specs = KITTI_MODEL_SPECS if dataset == "kitti" else MODEL_SPECS
     if dataset not in ("unified6", "kitti"):
         raise ValueError("dataset must be 'unified6' or 'kitti'.")
+    specs = KITTI_MODEL_SPECS if dataset == "kitti" else MODEL_SPECS
     try:
         return specs[str(variant)]
     except KeyError as error:
         raise ValueError(
-            f"Unknown model variant {variant!r}; expected one of {MODEL_VARIANTS}."
+            f"Model variant {variant!r} is not available for {dataset}; "
+            f"expected one of {tuple(specs)}."
         ) from error
 
 
 class _DinoV2(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, model_name: str = "da3-small") -> None:
         super().__init__()
-        self.pretrained = vit_small()
+        builders = {"da3-small": vit_small, "da3-base": vit_base}
+        try:
+            self.pretrained = builders[str(model_name)]()
+        except KeyError as error:
+            raise ValueError(f"Unsupported DA3 model name: {model_name!r}.") from error
 
 
 class _DA3Net(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self, model_name: str = "da3-small") -> None:
         super().__init__()
-        self.backbone = _DinoV2()
+        self.backbone = _DinoV2(model_name)
 
 
 class _DA3Wrapper(nn.Module):
     """Only the state-bearing DA3 hierarchy needed by the experiment."""
 
-    def __init__(self) -> None:
+    def __init__(self, model_name: str = "da3-small") -> None:
         super().__init__()
-        self.model = _DA3Net()
+        self.model_name = str(model_name)
+        self.model = _DA3Net(model_name)
 
     def _get_pretrained_backbone(self) -> nn.Module:
         return self.model.backbone.pretrained
 
-    @staticmethod
-    def get_backbone_metadata() -> Dict[str, object]:
+    def get_backbone_metadata(self) -> Dict[str, object]:
+        native_dim = int(self._get_pretrained_backbone().embed_dim)
         return {
-            "token_dim": 384,
-            "feature_dim": 768,
+            "token_dim": native_dim,
+            "feature_dim": native_dim * 2,
             "out_layers": (5, 7, 9, 11),
             "total_layers": 12,
             "cat_token": True,
@@ -168,11 +377,13 @@ class DA3Backbone(nn.Module):
         *,
         backbone_dtype: torch.dtype = torch.bfloat16,
         freeze: bool = False,
+        model_name: str = "da3-small",
     ) -> None:
         super().__init__()
         self.backbone_dtype = backbone_dtype
         self.freeze = bool(freeze)
-        self.model = _DA3Wrapper()
+        self.model_name = str(model_name)
+        self.model = _DA3Wrapper(model_name)
         self.register_buffer(
             "_imagenet_mean",
             torch.tensor([0.485, 0.456, 0.406]).view(1, 1, 3, 1, 1),
@@ -188,7 +399,9 @@ class DA3Backbone(nn.Module):
     def load_base_checkpoint(self, checkpoint_dir: str | Path) -> None:
         path = Path(checkpoint_dir) / "model.safetensors"
         if not path.is_file():
-            raise FileNotFoundError(f"Missing DA3-small model.safetensors: {path}")
+            raise FileNotFoundError(
+                f"Missing {self.model_name} model.safetensors: {path}"
+            )
         from safetensors.torch import load_file
 
         all_weights = load_file(str(path), device="cpu")
@@ -199,7 +412,7 @@ class DA3Backbone(nn.Module):
         }
         status = self.model.load_state_dict(weights, strict=True)
         if status.missing_keys or status.unexpected_keys:
-            raise RuntimeError(f"Invalid DA3-small checkpoint: {status}")
+            raise RuntimeError(f"Invalid {self.model_name} checkpoint: {status}")
         self.set_frozen(self.freeze)
 
     def set_frozen(self, freeze: bool) -> None:
@@ -283,13 +496,15 @@ def _grid_config(
 
 
 class TargetDepthModel(nn.Module):
-    """The sole architecture retained in this repository."""
+    """Released DA3-small pre-fusion architecture."""
 
     fusion_contract = FUSION_CONTRACT
     depth_scale_contract = SCALE_CONTRACT
     online_knn_contract = ONLINE_KNN_CONTRACT
     dpt_prompt_contract = DPT_PROMPT_CONTRACT
     initialization_contract = INITIALIZATION_CONTRACT
+    prediction_mode = "relative_online_knn_minmax"
+    da3_model_name = "da3-small"
 
     def __init__(
         self,
@@ -302,6 +517,11 @@ class TargetDepthModel(nn.Module):
         super().__init__()
         self.patch_size = 14
         self.num_views = 1
+        self.native_dim = 384
+        self.feature_dim = 768
+        self.uses_depth_tokens = True
+        self.uses_voxel_tokens = True
+        self.scaled = True
         self.backbone = DA3Backbone(
             backbone_dtype=backbone_dtype, freeze=freeze_backbone
         )
@@ -361,7 +581,7 @@ class TargetDepthModel(nn.Module):
         batch_size, views, height, width = log_depth.shape
         depth_tokens = self.depth_patch_embed(
             log_depth.reshape(batch_size * views, 1, height, width)
-        ).reshape(batch_size, views, -1, 384)
+        ).reshape(batch_size, views, -1, self.native_dim)
         valid_patches = _valid_depth_patch_mask(
             valid.reshape(batch_size * views, 1, height, width), 14
         ).flatten(1).reshape(batch_size, views, -1)
@@ -413,8 +633,8 @@ class TargetDepthModel(nn.Module):
     def _encode_one(
         self,
         image: torch.Tensor,
-        depth_tokens: torch.Tensor,
-        valid_depth_patches: torch.Tensor,
+        depth_tokens: Optional[torch.Tensor],
+        valid_depth_patches: Optional[torch.Tensor],
         voxel_tokens: List[torch.Tensor],
         voxel_patch_indices: List[torch.Tensor],
     ) -> torch.Tensor:
@@ -425,14 +645,18 @@ class TargetDepthModel(nn.Module):
         cls_token, rgb_tokens, absolute_pos = self._prepare_rgb_tokens(image)
         sequences, local_positions, global_positions = [], [], []
         for view_index in range(views):
-            depth_indices = torch.nonzero(
-                valid_depth_patches[view_index], as_tuple=False
-            ).flatten()
-            selected_depth = (
-                depth_tokens[view_index : view_index + 1, depth_indices]
-                + absolute_pos[:, 1:][:, depth_indices]
-                + 1.0
-            )
+            if depth_tokens is None or valid_depth_patches is None:
+                depth_indices = torch.zeros(0, dtype=torch.long, device=image.device)
+                selected_depth = rgb_tokens.new_zeros((1, 0, self.native_dim))
+            else:
+                depth_indices = torch.nonzero(
+                    valid_depth_patches[view_index], as_tuple=False
+                ).flatten()
+                selected_depth = (
+                    depth_tokens[view_index : view_index + 1, depth_indices]
+                    + absolute_pos[:, 1:][:, depth_indices]
+                    + 1.0
+                )
             voxel_indices = voxel_patch_indices[view_index].to(
                 device=image.device, dtype=torch.long
             )
@@ -502,34 +726,52 @@ class TargetDepthModel(nn.Module):
         for local_sequence, sequence in zip(local_x, sequences):
             combined = torch.cat([local_sequence, sequence], dim=-1)
             combined = torch.cat(
-                [combined[..., :384], vit.norm(combined[..., 384:])], dim=-1
+                [
+                    combined[..., : self.native_dim],
+                    vit.norm(combined[..., self.native_dim :]),
+                ],
+                dim=-1,
             )
             rgb = combined.index_select(2, rgb_positions)
-            outputs.append(rgb.reshape(1, 1, grid_height, grid_width, 768))
+            outputs.append(
+                rgb.reshape(1, 1, grid_height, grid_width, self.feature_dim)
+            )
         return torch.cat(outputs, dim=1).contiguous()
 
     def _encode(
         self,
         images: torch.Tensor,
-        sparse_depth: torch.Tensor,
-        sparse_mask: torch.Tensor,
-        intrinsics: torch.Tensor,
+        sparse_depth: Optional[torch.Tensor],
+        sparse_mask: Optional[torch.Tensor],
+        intrinsics: Optional[torch.Tensor],
         origin: Optional[torch.Tensor],
         size: Optional[torch.Tensor],
         grid: Optional[Tuple[int, int, int]],
     ) -> torch.Tensor:
-        depth_tokens, valid_patches = self._sparse_depth_tokens(
-            images, sparse_depth, sparse_mask
-        )
-        encoded = self.voxel_token_encoder(
-            sparse_depth,
-            sparse_mask,
-            intrinsics,
-            vox_origin=origin,
-            vox_size=size,
-            vox_grid=grid,
-        )
-        features, _centers, frame_indices, patch_rows, patch_cols = encoded
+        if self.uses_depth_tokens:
+            if sparse_depth is None or sparse_mask is None:
+                raise RuntimeError("Sparse depth is required for depth-token fusion.")
+            depth_tokens, valid_patches = self._sparse_depth_tokens(
+                images, sparse_depth, sparse_mask
+            )
+        else:
+            depth_tokens = valid_patches = None
+        if self.uses_voxel_tokens:
+            if sparse_depth is None or sparse_mask is None or intrinsics is None:
+                raise RuntimeError(
+                    "Sparse depth and intrinsics are required for voxel fusion."
+                )
+            encoded = self.voxel_token_encoder(
+                sparse_depth,
+                sparse_mask,
+                intrinsics,
+                vox_origin=origin,
+                vox_size=size,
+                vox_grid=grid,
+            )
+            features, _centers, frame_indices, patch_rows, patch_cols = encoded
+        else:
+            features = frame_indices = patch_rows = patch_cols = None
         batch_size, views = images.shape[:2]
         grid_width = images.shape[-1] // 14
         outputs = []
@@ -537,11 +779,13 @@ class TargetDepthModel(nn.Module):
             tokens_by_view, indices_by_view = [], []
             for view_index in range(views):
                 if features is None:
-                    tokens_by_view.append(images.new_zeros((0, 384)))
+                    tokens_by_view.append(images.new_zeros((0, self.native_dim)))
                     indices_by_view.append(
                         torch.zeros(0, dtype=torch.long, device=images.device)
                     )
                 else:
+                    assert frame_indices is not None
+                    assert patch_rows is not None and patch_cols is not None
                     selected = frame_indices == batch_index * views + view_index
                     tokens_by_view.append(features[selected])
                     indices_by_view.append(
@@ -550,8 +794,8 @@ class TargetDepthModel(nn.Module):
             outputs.append(
                 self._encode_one(
                     images[batch_index],
-                    depth_tokens[batch_index],
-                    valid_patches[batch_index],
+                    None if depth_tokens is None else depth_tokens[batch_index],
+                    None if valid_patches is None else valid_patches[batch_index],
                     tokens_by_view,
                     indices_by_view,
                 )
@@ -588,19 +832,28 @@ class TargetDepthModel(nn.Module):
         grid_config: Optional[Dict[str, object]] = None,
     ) -> Dict[str, torch.Tensor]:
         del T_target_from_refcam, gt_depth, return_depth
-        if points_per_frame is None or T_cam_from_velo is None or K_per_frame is None:
-            raise RuntimeError("Raw LiDAR, camera transform and intrinsics are required.")
         device = views[0]["img"].device
         resolved_hw = _resolve_image_hw(views, image_hw, device)
         images = self.backbone.stack_images(views).to(device=device)
-        sparse_depth, sparse_mask = projected_lidar_sparse_depth(
-            points_per_frame,
-            T_cam_from_velo,
-            K_per_frame,
-            resolved_hw,
-            device=device,
-            allow_empty_single_view=True,
-        )
+        if self.uses_depth_tokens or self.uses_voxel_tokens:
+            if (
+                points_per_frame is None
+                or T_cam_from_velo is None
+                or K_per_frame is None
+            ):
+                raise RuntimeError(
+                    "Raw LiDAR, camera transform and intrinsics are required."
+                )
+            sparse_depth, sparse_mask = projected_lidar_sparse_depth(
+                points_per_frame,
+                T_cam_from_velo,
+                K_per_frame,
+                resolved_hw,
+                device=device,
+                allow_empty_single_view=True,
+            )
+        else:
+            sparse_depth = sparse_mask = None
         origin, size, grid = _grid_config(grid_config, device)
         autocast_enabled = device.type == "cuda" and self.backbone.backbone_dtype in (
             torch.float16,
@@ -613,24 +866,109 @@ class TargetDepthModel(nn.Module):
         ):
             tokens = self._encode(
                 images,
-                sparse_depth.to(device),
-                sparse_mask.to(device),
-                K_per_frame.to(device),
+                None if sparse_depth is None else sparse_depth.to(device),
+                None if sparse_mask is None else sparse_mask.to(device),
+                None if K_per_frame is None else K_per_frame.to(device),
                 origin,
                 size,
                 grid,
             )
-            relative_depth = self.dense_depth_head(
-                tokens, resolved_hw, prompt_depth=knn_depth
+            depth = self.dense_depth_head(
+                tokens,
+                resolved_hw,
+                prompt_depth=knn_depth if self.scaled else None,
             ).float()
-        scale_min, scale_max = self._knn_bounds(knn_depth, relative_depth)
-        dense_depth = relative_depth * (scale_max - scale_min) + scale_min
+        if not self.scaled:
+            return {"dense_depth": depth}
+        scale_min, scale_max = self._knn_bounds(knn_depth, depth)
+        dense_depth = depth * (scale_max - scale_min) + scale_min
         return {
             "dense_depth": dense_depth,
-            "relative_depth": relative_depth,
+            "relative_depth": depth,
             "scale_min": scale_min,
             "scale_max": scale_max,
         }
+
+
+class DA3BaseDepthModel(TargetDepthModel):
+    """Configurable DA3-Base KITTI token-fusion family."""
+
+    def __init__(
+        self,
+        spec: ModelSpec,
+        *,
+        da3_checkpoint: str | Path | None = None,
+        backbone_dtype: torch.dtype = torch.bfloat16,
+        freeze_backbone: bool = False,
+        load_base: bool = True,
+    ) -> None:
+        nn.Module.__init__(self)
+        if spec.da3_model_name != "da3-base":
+            raise ValueError("DA3BaseDepthModel requires a da3-base model spec.")
+        self.variant = spec.variant
+        self.expected_experiment = spec.experiment
+        self.model_class = spec.model_class
+        self.fusion_contract = spec.fusion_contract
+        self.initialization_contract = spec.initialization_contract
+        self.prediction_mode = spec.prediction_mode
+        self.depth_scale_contract = spec.depth_scale_contract
+        self.online_knn_contract = spec.online_knn_contract
+        self.dpt_prompt_contract = spec.dpt_prompt_contract
+        self.da3_model_name = spec.da3_model_name
+        self.patch_size = 14
+        self.num_views = 1
+        self.native_dim = spec.native_dim
+        self.feature_dim = spec.token_dim
+        self.uses_depth_tokens = spec.uses_depth_tokens
+        self.uses_voxel_tokens = spec.uses_voxel_tokens
+        self.scaled = spec.scaled
+
+        self.backbone = DA3Backbone(
+            backbone_dtype=backbone_dtype,
+            freeze=freeze_backbone,
+            model_name=spec.da3_model_name,
+        )
+        if load_base:
+            if da3_checkpoint is None:
+                raise ValueError("da3_checkpoint is required when load_base=True.")
+            self.backbone.load_base_checkpoint(da3_checkpoint)
+            restore_da3_base_head_rng_state()
+
+        self.dense_depth_head = SingleScaleDPTDepthHead(
+            token_dim=spec.token_dim,
+            patch_size=14,
+            features=128,
+            initial_depth=10.0,
+            prompt_depth_enabled=spec.scaled,
+            prompt_depth_scale="per_frame_minmax" if spec.scaled else "log",
+            depth_output_mode="normalized_sigmoid" if spec.scaled else "metric",
+            refinement_style="promptda" if spec.scaled else "baseline",
+        )
+        vit = self.backbone.model._get_pretrained_backbone()
+        if spec.uses_depth_tokens:
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(0)
+                self.depth_patch_embed = type(vit.patch_embed)(
+                    img_size=(168, 518),
+                    patch_size=14,
+                    in_chans=1,
+                    embed_dim=spec.native_dim,
+                )
+        if spec.uses_voxel_tokens:
+            self.voxel_token_encoder = PatchDepthBinFeatureEncoder(
+                d_out=spec.native_dim,
+                H_t=12,
+                W_t=37,
+                patch_size=14,
+                depth_bin_size=4.0,
+                vox_origin=(-25.6, -2.0, 0.0),
+                vox_size=(0.4, 0.4, 0.4),
+                vox_grid=(128, 16, 128),
+                d_token=128,
+                hidden=64,
+                pe_num_freqs=8,
+                dynamic_image_size=False,
+            )
 
 
 def build_model(
@@ -647,14 +985,47 @@ def build_model(
         return PostFusionDepthModel(
             da3_checkpoint=da3_checkpoint, load_base=load_base
         )
-    get_model_spec(variant)
-    raise AssertionError("unreachable")
+    if variant in DA3_BASE_MODEL_VARIANTS:
+        return DA3BaseDepthModel(
+            get_model_spec(variant, "kitti"),
+            da3_checkpoint=da3_checkpoint,
+            load_base=load_base,
+        )
+    raise ValueError(f"Unknown model variant {variant!r}.")
 
 
 def load_trained_checkpoint(
     model: nn.Module, checkpoint: str | Path
 ) -> Dict[str, object]:
     payload = torch.load(str(checkpoint), map_location="cpu", weights_only=False)
+    if not isinstance(payload, dict):
+        raise RuntimeError("Checkpoint payload must be a mapping.")
+    if getattr(model, "da3_model_name", None) == "da3-base":
+        args = payload.get("args", {})
+        if isinstance(args, dict):
+            get_value = args.get
+        else:
+            get_value = lambda key, default=None: getattr(args, key, default)
+        expected = {
+            "exp": getattr(model, "expected_experiment", None),
+            "da3_model_name": "da3-base",
+            "token_dim": getattr(model, "feature_dim", None),
+        }
+        mismatches = []
+        for key, wanted in expected.items():
+            actual = get_value(key, None)
+            if actual is not None and wanted is not None and actual != wanted:
+                mismatches.append(f"{key}={actual!r}, expected {wanted!r}")
+        checkpoint_variant = get_value("model_variant", None)
+        if (
+            checkpoint_variant is not None
+            and checkpoint_variant != getattr(model, "variant", None)
+        ):
+            mismatches.append(
+                f"model_variant={checkpoint_variant!r}, expected {model.variant!r}"
+            )
+        if mismatches:
+            raise RuntimeError("Checkpoint metadata mismatch: " + "; ".join(mismatches))
     state = payload.get("model", payload)
     model.load_state_dict(state, strict=True)
     return payload

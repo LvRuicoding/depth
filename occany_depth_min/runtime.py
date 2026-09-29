@@ -175,7 +175,9 @@ def evaluate_loader(
     result = accumulator.compute()
     result.update(
         {
-            "prediction_mode": "relative_online_knn_minmax",
+            "prediction_mode": getattr(
+                forward_model, "prediction_mode", "relative_online_knn_minmax"
+            ),
             "num_batches": total_batches,
             "local_num_batches": batches,
             "elapsed_seconds": time.time() - started,
