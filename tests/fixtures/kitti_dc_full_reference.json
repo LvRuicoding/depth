@@ -1,0 +1,178 @@
+{
+  "prefusion/patchdepthbin/image": {
+    "keys": 269,
+    "parameters": 93502785,
+    "structure_sha256": "dc333114ea044f1c0702ac63d311ac49d9988fed3cb4ad3752ebc74eb2cda037",
+    "non_backbone_sha256": "adde544a4282b26fff6ac8f571aad27865716e17cfb5c113d7125f4590da70f3",
+    "model_class": "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionRGBOnlyDirectMetricModel",
+    "cpu_rng_sha256": "5c8d1044bc07ea10644b9bd6a5ce16f082e985ef97c7c440330240633a969f85"
+  },
+  "prefusion/patchdepthbin/depth": {
+    "keys": 271,
+    "parameters": 93654081,
+    "structure_sha256": "7af7c2bf1ed8c385d5e84ff117314c39ac8e6e77a54c7231122d2f53a7121fc1",
+    "non_backbone_sha256": "dc0d87b202a467f5da8954f55eb2e5f1d4e28bd8e4988df1e98d013877755c36",
+    "model_class": "Stage1DepthLingBotDA3LastDirectMetricModel",
+    "cpu_rng_sha256": "5c8d1044bc07ea10644b9bd6a5ce16f082e985ef97c7c440330240633a969f85"
+  },
+  "prefusion/patchdepthbin/voxel": {
+    "keys": 281,
+    "parameters": 93648641,
+    "structure_sha256": "21261a280743d1fc026fe9c00ba8d9a516566bcc4500036b4813959b0d137f44",
+    "non_backbone_sha256": "25b76b0b44c579b6e1b02accc9ce2d1e6bfbbdded43c05608edb554e7b2dff3f",
+    "model_class": "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionRGBVoxelDirectMetricModel",
+    "cpu_rng_sha256": "b337a609e1688f6cda59fa77e82c7385f42b9e16586cf61a9427b47240b10707"
+  },
+  "prefusion/patchdepthbin/voxel_depth": {
+    "keys": 283,
+    "parameters": 93799937,
+    "structure_sha256": "0724fb093d3fff783f4e7d3f941d02137e65be6f27fb78f2b6542025549bae54",
+    "non_backbone_sha256": "8e452e144b1699ee83132cf0d042e20ab723db47f9ba2c3f42ae210742a05265",
+    "model_class": "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionDirectMetricModel",
+    "cpu_rng_sha256": "b337a609e1688f6cda59fa77e82c7385f42b9e16586cf61a9427b47240b10707"
+  },
+  "prefusion/patchdepthbin/depth_scaled": {
+    "keys": 303,
+    "parameters": 94905921,
+    "structure_sha256": "2cedb505d7b12968a1f031af5f2aa991cec8972e89d0df410e0f6381a4a4c793",
+    "non_backbone_sha256": "861a5742fd457ef7a8905a69c1e3135c34e632d6d70cfbcc656fe799ed989a3f",
+    "model_class": "Stage1DepthLingBotDA3LastDepthImageOnlineKNNPromptDAScaledUnified6Model",
+    "cpu_rng_sha256": "8f3bfb4418de13e2f3a39807109165885a46f1306d53a1650e46bbdd0ec2cc9b"
+  },
+  "prefusion/patchdepthbin/voxel_scaled": {
+    "keys": 313,
+    "parameters": 94900481,
+    "structure_sha256": "882376aec98ac781f81bbbcffc746972ec1999d085a44e136edfea9b7088dde7",
+    "non_backbone_sha256": "601a2c09d2b5666d3c70d891625c7c45a670b5778943660a6f572b2be8d792e6",
+    "model_class": "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionRGBVoxelOnlineKNNPromptDAScaledUnified6Model",
+    "cpu_rng_sha256": "20cffe03fed8a8e40a92658cb8687e25e4d723a4bce5a85dc6054efe52bb84a2"
+  },
+  "prefusion/patchdepthbin/voxel_depth_scaled": {
+    "keys": 315,
+    "parameters": 95051777,
+    "structure_sha256": "7f6d99e12c2172387ab960e75d0c679d6cd4c71d9202392f3997b0157bafb29d",
+    "non_backbone_sha256": "0a2d9d1556b7499e67273063268466802263dc14f2163bb43e3504cb348e8ea2",
+    "model_class": "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionOnlineKNNPromptDAScaledUnified6Model",
+    "cpu_rng_sha256": "20cffe03fed8a8e40a92658cb8687e25e4d723a4bce5a85dc6054efe52bb84a2"
+  },
+  "prefusion/vfe/voxel": {
+    "keys": 281,
+    "parameters": 93648705,
+    "structure_sha256": "32e468c0bc434386fcf0e528f0d008134a7a9cbbc7e81ba6932004737004302a",
+    "non_backbone_sha256": "8189c240e5a4f1696a0082c482a414140977bc2a3569d95bc68a182b1dbdeead",
+    "model_class": "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionRGBVoxelDirectMetricModel",
+    "cpu_rng_sha256": "637ab142aa27aaa953fafade77f945f68ee2ae4d4b50dbfcca8e2a23467ac922"
+  },
+  "prefusion/vfe/voxel_depth": {
+    "keys": 283,
+    "parameters": 93800001,
+    "structure_sha256": "3436bf334a814f8881e76917eeca5083c30fe105f6ce0ee9e85e1ec83d1341ae",
+    "non_backbone_sha256": "cf3da4a176af22f60411ef62ca1512aa6247f544a34c5c805ce70af8b6d4b304",
+    "model_class": "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionDirectMetricModel",
+    "cpu_rng_sha256": "637ab142aa27aaa953fafade77f945f68ee2ae4d4b50dbfcca8e2a23467ac922"
+  },
+  "prefusion/vfe/voxel_scaled": {
+    "keys": 313,
+    "parameters": 94900545,
+    "structure_sha256": "13fb7cdf45f1613b4f0f95bbf81eec206ab70a30929a52c04e5fe7a97410a64b",
+    "non_backbone_sha256": "a0c76e7a005dd0ae315eaa08ae6de5e3449a29a067f8c2ea415323117c7bb2c3",
+    "model_class": "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionRGBVoxelOnlineKNNPromptDAScaledUnified6Model",
+    "cpu_rng_sha256": "71c43469b712c2cec7262c1438baa30eacc46009931bef859a0c34fce28f24ec"
+  },
+  "prefusion/vfe/voxel_depth_scaled": {
+    "keys": 315,
+    "parameters": 95051841,
+    "structure_sha256": "56f50a6ec4f1c1b489d5a4a0674e5955ec7acfaa919aa49067ed699063298813",
+    "non_backbone_sha256": "c2436e0676d18299a6561ebc395be3163d7cd75bf2ceb0f6567e085f47af1bbd",
+    "model_class": "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionOnlineKNNPromptDAScaledUnified6Model",
+    "cpu_rng_sha256": "71c43469b712c2cec7262c1438baa30eacc46009931bef859a0c34fce28f24ec"
+  },
+  "postfusion/patchdepthbin/image": {
+    "keys": 269,
+    "parameters": 93502785,
+    "structure_sha256": "dc333114ea044f1c0702ac63d311ac49d9988fed3cb4ad3752ebc74eb2cda037",
+    "non_backbone_sha256": "adde544a4282b26fff6ac8f571aad27865716e17cfb5c113d7125f4590da70f3",
+    "model_class": "Stage1DepthLingBotDA3LastPatchDepth4mVoxelPreFusionRGBOnlyDirectMetricModel",
+    "cpu_rng_sha256": "5c8d1044bc07ea10644b9bd6a5ce16f082e985ef97c7c440330240633a969f85"
+  },
+  "postfusion/patchdepthbin/depth": {
+    "keys": 289,
+    "parameters": 98382657,
+    "structure_sha256": "c8e7cccc3503b515f22492c4f9057d9c61c3bd81908833911928d97715210940",
+    "non_backbone_sha256": "3b1b57a0d1a9f8f00dfa9f8790df1361ab3424c4f93577ef5ad3206863cdc59e",
+    "model_class": "Stage1DepthKITTIFullPostFusionDirectMetricModel",
+    "cpu_rng_sha256": "113cac4a5cd2e3ebc0aa4a282802b35d33541d3b4f3cdcccfe1bc5140bc470a6"
+  },
+  "postfusion/patchdepthbin/voxel": {
+    "keys": 299,
+    "parameters": 98377217,
+    "structure_sha256": "5d57dcc4a35bb0b65708885f4f8e247b6fb1664082d3b2ad2f81a79f5aacc9e0",
+    "non_backbone_sha256": "d977f75e791667543f9c241ef9001e4ab0067df3d0c84e15f438af23524b8176",
+    "model_class": "Stage1DepthKITTIFullPostFusionDirectMetricModel",
+    "cpu_rng_sha256": "d363cc0f2dc9fa259130879136b6e895117c276fad2aed4056e8182865c0b1a8"
+  },
+  "postfusion/patchdepthbin/voxel_depth": {
+    "keys": 319,
+    "parameters": 103257089,
+    "structure_sha256": "045fbfaae84ae58a8f831c40ab11903a33d1fac38781dd0fc09135da02a4e6a7",
+    "non_backbone_sha256": "d16e42d17d8af05b8a852d0c983f530e8e23a5811925d74a8234149502dbd45d",
+    "model_class": "Stage1DepthKITTIFullPostFusionDirectMetricModel",
+    "cpu_rng_sha256": "b608cbd02ceae6a46516af26e91c9c9a00d2a6fad5ecdab45003773f0a4653d4"
+  },
+  "postfusion/patchdepthbin/depth_scaled": {
+    "keys": 321,
+    "parameters": 99634497,
+    "structure_sha256": "f0a24700ac3013646f6a001690796ffa2e7012dd8dfdbb26b51d354a39bf4e46",
+    "non_backbone_sha256": "4e183721675640667920755558390fa91ff5af722bd097087ec279508cfb1920",
+    "model_class": "Stage1DepthKITTIFullPostFusionPromptDAScaledModel",
+    "cpu_rng_sha256": "2b5d5fe2a507b461f1fa535f93d6bd4f16732f93e6619761e3b21d93ec1f343f"
+  },
+  "postfusion/patchdepthbin/voxel_scaled": {
+    "keys": 331,
+    "parameters": 99629057,
+    "structure_sha256": "1254370fbeda03a4d13bae492e016bd20ac8a3e41cb8894b439d0c7a65aa39a4",
+    "non_backbone_sha256": "4e38870171fbac5a2cd96c260e41aa9e75c09cbb9a0e91caebd0e3fc4ad29ad7",
+    "model_class": "Stage1DepthKITTIFullPostFusionPromptDAScaledModel",
+    "cpu_rng_sha256": "38333b61783f5b31a8e5ecc277c2c8061a562c02de5a35f1788b9258440729a0"
+  },
+  "postfusion/patchdepthbin/voxel_depth_scaled": {
+    "keys": 351,
+    "parameters": 104508929,
+    "structure_sha256": "b847ae74647eb6e416890478c57d7e3b7e5f5a67229fc96fed692ab2849591fa",
+    "non_backbone_sha256": "735a065fa4bd2009fc45017672575896b01edf4e2d4c02a72f7afeccea77d200",
+    "model_class": "Stage1DepthKITTIFullPostFusionPromptDAScaledModel",
+    "cpu_rng_sha256": "21ded3b3e7f1dc7d86ab83013d5df1c23788abfa482b5b07966bfd0a22ebec91"
+  },
+  "postfusion/vfe/voxel": {
+    "keys": 299,
+    "parameters": 98377281,
+    "structure_sha256": "99d36c0919dba36d0637e56f143080744d0ae1c928edd1a4afc675ebdfb9509d",
+    "non_backbone_sha256": "e4424ba09c105f73b0731313f9694253d7394f19f93cab05b8dcc622b9409241",
+    "model_class": "Stage1DepthKITTIFullPostFusionDirectMetricModel",
+    "cpu_rng_sha256": "113cac4a5cd2e3ebc0aa4a282802b35d33541d3b4f3cdcccfe1bc5140bc470a6"
+  },
+  "postfusion/vfe/voxel_depth": {
+    "keys": 319,
+    "parameters": 103257153,
+    "structure_sha256": "f3ad7e46c2a0f0b91542fdd0575f9b71372424c2e28ab46caa4dab61856e19f0",
+    "non_backbone_sha256": "6e583d49f346896d2eee5ce44c64f92463d9bae2cc37abe21224e2e0aa69567f",
+    "model_class": "Stage1DepthKITTIFullPostFusionDirectMetricModel",
+    "cpu_rng_sha256": "782836150d6140c00cdcbc74f6d3adf0f370dfc6d60bc0a887f44cddee3cb7fe"
+  },
+  "postfusion/vfe/voxel_scaled": {
+    "keys": 331,
+    "parameters": 99629121,
+    "structure_sha256": "46528224a80932a9982f6c8dd6e20cbd1d18684faee4ecdfc2b479936c7940d5",
+    "non_backbone_sha256": "4f3af3f3c57befb0921bfa55e0d3c4687bd3d5bed21a9a6c9aab59512712b40d",
+    "model_class": "Stage1DepthKITTIFullPostFusionPromptDAScaledModel",
+    "cpu_rng_sha256": "2b5d5fe2a507b461f1fa535f93d6bd4f16732f93e6619761e3b21d93ec1f343f"
+  },
+  "postfusion/vfe/voxel_depth_scaled": {
+    "keys": 351,
+    "parameters": 104508993,
+    "structure_sha256": "1f2417f576e4a96a80917b4555ddd48fd20e811c4dec90f62fed76285c40d279",
+    "non_backbone_sha256": "008f951583b6dd137a7ba48ebdc2772f9362178eeabc2a3e27a998b9283c2a28",
+    "model_class": "Stage1DepthKITTIFullPostFusionPromptDAScaledModel",
+    "cpu_rng_sha256": "e172a771cd4bbc9a9a9c2c9b18a35edf456ae958c38e20cd9261d3c394fe074a"
+  }
+}

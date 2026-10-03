@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Original suite entry point; its fusion mode and encoder are fixed.
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+export FUSION_MODE=postfusion
+export VOXEL_ENCODER=patchdepthbin
+export KITTI_DC_FULL_SUITE_FUSION=postfusion
+export KITTI_DC_FULL_SUITE_ENCODER=patchdepthbin
+exec bash "$script_dir/run_kitti_dc_full.sh" "$@"
