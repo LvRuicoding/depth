@@ -13,7 +13,9 @@ Usage: scripts/run_kitti_dc_full.sh [train|eval-val|smoke|summarize] [arguments]
   --fusion-mode MODE        prefusion (default) or postfusion
   --voxel-encoder ENCODER   patchdepthbin (default) or vfe
   --models "MODEL ..."      Ordered subset; defaults to seven models, or four for VFE
-  --checkpoint-epochs "5 10"  Checkpoints evaluated by eval-val (default: 5 10)
+  --input-long-side N       Resize long side before patch-14 padding (default: 1232)
+  --epochs N               Training schedule length (default: 10)
+  --checkpoint-epochs "5 10"  Eval checkpoints (default: every 5 epochs up to --epochs)
   --num-workers N           Data-loader workers (default: 4)
   --print-freq N            Logging interval (default: 20; smoke: 1)
   --smoke-steps N           Bounded smoke iterations (default: 2)
@@ -22,7 +24,7 @@ Usage: scripts/run_kitti_dc_full.sh [train|eval-val|smoke|summarize] [arguments]
   --torchrun PATH          Torchrun executable (default: torchrun from PATH)
   --dry-run                Preview commands without creating outputs or querying GPUs
 Environment equivalents: KITTI_DC_ROOT, DA3_CKPT, OUTPUT_ROOT, FUSION_MODE,
-VOXEL_ENCODER, MODELS, CKPT_EPOCHS, NUM_WORKERS, PRINT_FREQ, SMOKE_STEPS,
+VOXEL_ENCODER, MODELS, INPUT_LONG_SIDE, EPOCHS, CKPT_EPOCHS, NUM_WORKERS, PRINT_FREQ, SMOKE_STEPS,
 NPROC_PER_NODE, PYTHON, TORCHRUN, DRY_RUN, CUDA_VISIBLE_DEVICES.
 Postfusion VFE waits for each selected GPU to use <5120 MiB; configure NVIDIA_SMI,
 GPU_MEMORY_LIMIT_MIB and GPU_POLL_SECONDS when necessary.
@@ -42,7 +44,9 @@ output_root=${OUTPUT_ROOT:-}
 fusion_mode=${FUSION_MODE:-prefusion}
 voxel_encoder=${VOXEL_ENCODER:-patchdepthbin}
 models=${MODELS:-}
-checkpoint_epochs=${CKPT_EPOCHS:-5 10}
+input_long_side=${INPUT_LONG_SIDE:-1232}
+epochs=${EPOCHS:-10}
+checkpoint_epochs=${CKPT_EPOCHS:-}
 num_workers=${NUM_WORKERS:-4}
 print_freq=${PRINT_FREQ:-}
 smoke_steps=${SMOKE_STEPS:-2}
@@ -61,6 +65,8 @@ while (( $# )); do
     --fusion-mode) need_value "$@"; fusion_mode="$2"; shift 2 ;;
     --voxel-encoder) need_value "$@"; voxel_encoder="$2"; shift 2 ;;
     --models) need_value "$@"; models="$2"; shift 2 ;;
+    --input-long-side) need_value "$@"; input_long_side="$2"; shift 2 ;;
+    --epochs) need_value "$@"; epochs="$2"; shift 2 ;;
     --checkpoint-epochs) need_value "$@"; checkpoint_epochs="$2"; shift 2 ;;
     --num-workers) need_value "$@"; num_workers="$2"; shift 2 ;;
     --print-freq) need_value "$@"; print_freq="$2"; shift 2 ;;
@@ -73,6 +79,10 @@ case "$stage" in train|eval-val|smoke|summarize) ;; *) die "Unknown stage: $stag
 [[ "$voxel_encoder" == patchdepthbin || "$voxel_encoder" == vfe ]] || die "Invalid voxel encoder: $voxel_encoder"
 [[ -z "${KITTI_DC_FULL_SUITE_FUSION:-}" || "$fusion_mode" == "$KITTI_DC_FULL_SUITE_FUSION" ]] || die "This suite requires fusion mode $KITTI_DC_FULL_SUITE_FUSION"
 [[ -z "${KITTI_DC_FULL_SUITE_ENCODER:-}" || "$voxel_encoder" == "$KITTI_DC_FULL_SUITE_ENCODER" ]] || die "This suite requires voxel encoder $KITTI_DC_FULL_SUITE_ENCODER"
+[[ "$input_long_side" =~ ^[1-9][0-9]*$ ]] || die "--input-long-side must be a positive integer"
+[[ "$epochs" =~ ^[1-9][0-9]*$ ]] || die "--epochs must be a positive integer"
+[[ -z "${KITTI_DC_FULL_SUITE_INPUT_LONG_SIDE:-}" || "$input_long_side" == "$KITTI_DC_FULL_SUITE_INPUT_LONG_SIDE" ]] || die "This suite requires input long side $KITTI_DC_FULL_SUITE_INPUT_LONG_SIDE"
+[[ -z "${KITTI_DC_FULL_SUITE_EPOCHS:-}" || "$epochs" == "$KITTI_DC_FULL_SUITE_EPOCHS" ]] || die "This suite requires epochs $KITTI_DC_FULL_SUITE_EPOCHS"
 [[ "$dry_run" == 0 || "$dry_run" == 1 ]] || die "DRY_RUN must be 0 or 1"
 [[ -n "$output_root" ]] || die "--output-root (or OUTPUT_ROOT) is required"
 # Resolve relative paths against the repository, matching the original suites.
@@ -132,11 +142,16 @@ for model in "${model_names[@]}"; do
   [[ -z "${seen_models[$model]+set}" ]] || die "Duplicate model: $model"
   seen_models[$model]=1
 done
-read -r -a eval_epochs <<< "$checkpoint_epochs"
 if [[ "$stage" == eval-val ]]; then
-  (( ${#eval_epochs[@]} )) || die "--checkpoint-epochs must contain 5 or 10"
+  eval_epochs=()
+  if [[ -n "$checkpoint_epochs" ]]; then
+    read -r -a eval_epochs <<< "$checkpoint_epochs"
+  else
+    for (( epoch=5; epoch<=epochs; epoch+=5 )); do eval_epochs+=("$epoch"); done
+  fi
+  (( ${#eval_epochs[@]} )) || die "No scheduled checkpoint epochs; evaluation requires at least 5 training epochs"
   for epoch in "${eval_epochs[@]}"; do
-    [[ "$epoch" == 5 || "$epoch" == 10 ]] || die "Fixed training checkpoints are epochs 5 and 10"
+    [[ "$epoch" =~ ^[1-9][0-9]*$ ]] && (( epoch % 5 == 0 && epoch <= epochs )) || die "Checkpoint epochs must be positive multiples of five and not exceed EPOCHS=$epochs"
   done
 fi
 if [[ "$nproc_per_node" == 1 ]]; then
@@ -188,12 +203,13 @@ if [[ "$fusion_mode" == postfusion && "$voxel_encoder" == vfe ]]; then wait_for_
 for model in "${model_names[@]}"; do
   experiment="$model"
   [[ "$voxel_encoder" != vfe ]] || experiment="${model}_vfe"
-  run_dir="$output_root/single_frame/da3_base_$experiment/left_long1232_10ep_seed0"
+  run_dir="$output_root/single_frame/da3_base_$experiment/left_long${input_long_side}_${epochs}ep_seed0"
   if [[ "$stage" == smoke ]]; then run_dir="$output_root/validation/$experiment"; fi
   command=("$torchrun_command" --standalone --nproc_per_node="$nproc_per_node"
     -m occany_depth_min.kitti_dc_full "$stage"
     --model "$model" --fusion-mode "$fusion_mode" --voxel-encoder "$voxel_encoder"
     --kitti-dc-root "$kitti_dc_root" --da3-checkpoint "$da3_checkpoint"
+    --input-long-side "$input_long_side" --epochs "$epochs"
     --output-dir "$run_dir" --num-workers "$num_workers" --print-freq "$print_freq")
   case "$stage" in
     train)

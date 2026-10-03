@@ -20,6 +20,7 @@ SUITES = [
     ("run_kitti_dc_full_postfusion_seven_models.sh", "postfusion", "patchdepthbin", SEVEN),
     ("run_kitti_dc_full_postfusion_vfe_four_models.sh", "postfusion", "vfe", VFE),
 ]
+SUITE_518 = "run_kitti_dc_full_seven_models_518x168_5ep.sh"
 
 
 def executable(path, body):
@@ -72,6 +73,7 @@ with open(os.environ["CALLS_FILE"], "a") as handle:
         "FUSION_MODE", "VOXEL_ENCODER", "MODELS", "CKPT_EPOCHS", "NUM_WORKERS", "PRINT_FREQ",
         "SMOKE_STEPS", "DRY_RUN", "CUDA_VISIBLE_DEVICES", "KITTI_DC_FULL_SUITE_FUSION",
         "KITTI_DC_FULL_SUITE_ENCODER", "GPU_MEMORY_LIMIT_MIB", "GPU_POLL_SECONDS", "NVIDIA_SMI",
+        "INPUT_LONG_SIDE", "EPOCHS", "KITTI_DC_FULL_SUITE_INPUT_LONG_SIDE", "KITTI_DC_FULL_SUITE_EPOCHS",
     ):
         env.pop(name, None)
     env.update(
@@ -87,11 +89,12 @@ with open(os.environ["CALLS_FILE"], "a") as handle:
     class Runner:
         output = tmp_path / "suite with space"
 
-        def __call__(self, script="run_kitti_dc_full.sh", *args, paths=True, env_updates=None):
+        def __call__(self, script="run_kitti_dc_full.sh", *args, paths=True, output=True, env_updates=None):
             command = ["bash", str(SCRIPTS / script), *map(str, args)]
             if paths:
                 command += ["--kitti-dc-root", "/external/full data", "--da3-checkpoint", "/external/base weights"]
-            command += ["--output-root", str(self.output)]
+            if output:
+                command += ["--output-root", str(self.output)]
             actual_env = env.copy()
             actual_env.update(env_updates or {})
             return subprocess.run(command, env=actual_env, text=True, capture_output=True, timeout=15)
@@ -124,6 +127,8 @@ def test_original_suites_route_all_22_variants(runner, script, fusion, encoder, 
         assert value(args, "--voxel-encoder") == encoder
         assert value(args, "--kitti-dc-root") == "/external/full data"
         assert value(args, "--da3-checkpoint") == "/external/base weights"
+        assert value(args, "--input-long-side") == "1232"
+        assert value(args, "--epochs") == "10"
         suffix = "_vfe" if encoder == "vfe" else ""
         expected = runner.output / "single_frame" / f"da3_base_{model}{suffix}" / "left_long1232_10ep_seed0"
         assert value(args, "--output-dir") == str(expected)
@@ -159,11 +164,15 @@ def test_dry_run_writes_nothing_and_bypasses_gpu_query(runner, env_preview):
     assert not runner.calls("gpu")
 
 
-def test_auto_resume_is_per_model(runner):
-    checkpoint = runner.output / "single_frame/da3_base_voxel/left_long1232_10ep_seed0/checkpoint-last.pth"
+@pytest.mark.parametrize("script,run_name", [
+    ("run_kitti_dc_full.sh", "left_long1232_10ep_seed0"),
+    (SUITE_518, "left_long518_5ep_seed0"),
+])
+def test_auto_resume_is_per_model(runner, script, run_name):
+    checkpoint = runner.output / "single_frame/da3_base_voxel" / run_name / "checkpoint-last.pth"
     checkpoint.parent.mkdir(parents=True)
     checkpoint.touch()
-    result = runner("run_kitti_dc_full.sh", "train", "--models", "voxel depth")
+    result = runner(script, "train", "--models", "voxel depth")
     assert result.returncode == 0, result.stderr
     calls = runner.calls()
     assert value(calls[0], "--resume") == str(checkpoint)
@@ -216,7 +225,18 @@ def test_summary_needs_only_output_root(runner):
 
 @pytest.mark.parametrize("flags,error", [
     (["train", "--nproc-per-node", "1"], "Train/eval require 4 GPUs"),
-    (["eval-val", "--checkpoint-epochs", "15"], "Fixed training checkpoints"),
+    (["eval-val", "--checkpoint-epochs", "15"], "Checkpoint epochs"),
+    (["eval-val", "--epochs", "5", "--checkpoint-epochs", "10"], "Checkpoint epochs"),
+    (["eval-val", "--checkpoint-epochs", "0"], "Checkpoint epochs"),
+    (["eval-val", "--checkpoint-epochs", "-5"], "Checkpoint epochs"),
+    (["eval-val", "--checkpoint-epochs", "4"], "Checkpoint epochs"),
+    (["eval-val", "--epochs", "3"], "No scheduled checkpoint epochs"),
+    (["train", "--input-long-side", "0"], "positive integer"),
+    (["train", "--input-long-side", "-518"], "positive integer"),
+    (["train", "--input-long-side", "518.5"], "positive integer"),
+    (["train", "--epochs", "0"], "positive integer"),
+    (["train", "--epochs", "-5"], "positive integer"),
+    (["train", "--epochs", "5.5"], "positive integer"),
     (["train", "--voxel-encoder", "vfe", "--models", "image"], "VFE requires a voxel model"),
     (["train", "--models", "voxel voxel"], "Duplicate model"),
     (["smoke", "--smoke-steps", "0"], "positive integer"),
@@ -229,7 +249,7 @@ def test_invalid_suite_requests_stop_without_outputs(runner, flags, error):
     assert not runner.output.exists()
 
 
-@pytest.mark.parametrize("script,fusion,encoder,models", SUITES)
+@pytest.mark.parametrize("script,fusion,encoder,models", SUITES + [(SUITE_518, "prefusion", "patchdepthbin", SEVEN)])
 def test_wrapper_rejects_conflicting_suite_flags(runner, script, fusion, encoder, models):
     other_fusion = "postfusion" if fusion == "prefusion" else "prefusion"
     result = runner(script, "train", "--fusion-mode", other_fusion)
@@ -275,5 +295,85 @@ def test_help_and_shell_syntax(runner):
     result = runner("run_kitti_dc_full.sh", "--help", paths=False)
     assert result.returncode == 0
     assert "--output-root" in result.stdout
-    for script in ["run_kitti_dc_full.sh", *(suite[0] for suite in SUITES)]:
+    assert "--input-long-side" in result.stdout and "--epochs" in result.stdout
+    for script in ["run_kitti_dc_full.sh", SUITE_518, *(suite[0] for suite in SUITES)]:
         assert subprocess.run(["bash", "-n", str(SCRIPTS / script)], capture_output=True).returncode == 0
+
+
+@pytest.mark.parametrize("stage", ["train", "eval-val", "smoke"])
+def test_518_suite_routes_seven_models_and_epoch_five(runner, stage):
+    flags = ["--nproc-per-node", "1"] if stage == "smoke" else []
+    result = runner(SUITE_518, stage, *flags)
+    assert result.returncode == 0, result.stderr
+    calls = runner.calls()
+    assert len(calls) == len(SEVEN) + (stage != "smoke")
+    for args, model in zip(calls, SEVEN):
+        assert args[2:5] == ["-m", "occany_depth_min.kitti_dc_full", stage]
+        assert value(args, "--model") == model
+        assert value(args, "--fusion-mode") == "prefusion"
+        assert value(args, "--voxel-encoder") == "patchdepthbin"
+        assert value(args, "--input-long-side") == "518"
+        assert value(args, "--epochs") == "5"
+        expected = runner.output / "single_frame" / f"da3_base_{model}" / "left_long518_5ep_seed0"
+        if stage == "smoke":
+            expected = runner.output / "validation" / model
+            assert value(args, "--smoke-steps") == "2"
+        elif stage == "eval-val":
+            assert value(args, "--checkpoint") == str(expected / "checkpoint-epoch5.pth")
+        assert value(args, "--output-dir") == str(expected)
+    if stage != "smoke":
+        assert calls[-1] == ["-m", "occany_depth_min.kitti_dc_full", "summarize", "--output-root", str(runner.output)]
+
+
+def test_518_suite_defaults_override_conflicting_environment_without_writes(runner):
+    output = ROOT / "output/depth/kitti_dc_full_518x168_5ep"
+    existed = output.exists()
+    result = runner(SUITE_518, "eval-val", "--dry-run", output=False, env_updates={
+        "INPUT_LONG_SIDE": "1232", "EPOCHS": "10", "CKPT_EPOCHS": "5 10",
+        "FUSION_MODE": "postfusion", "VOXEL_ENCODER": "vfe", "MODELS": "voxel",
+    })
+    assert result.returncode == 0, result.stderr
+    commands = runner.dry_commands(result)
+    assert [value(args, "--model") for args in commands[:-1]] == SEVEN
+    for args, model in zip(commands, SEVEN):
+        expected = output / "single_frame" / f"da3_base_{model}" / "left_long518_5ep_seed0"
+        assert value(args, "--output-dir") == str(expected)
+        assert value(args, "--checkpoint") == str(expected / "checkpoint-epoch5.pth")
+    assert output.exists() == existed
+    assert not runner.calls() and not runner.calls("gpu")
+
+
+@pytest.mark.parametrize("flag,value_,error", [
+    ("--input-long-side", "1232", "requires input long side 518"),
+    ("--epochs", "10", "requires epochs 5"),
+    ("--checkpoint-epochs", "10", "Checkpoint epochs"),
+])
+def test_518_suite_rejects_conflicting_schedule(runner, flag, value_, error):
+    result = runner(SUITE_518, "eval-val", flag, value_)
+    assert result.returncode == 2
+    assert error in result.stderr
+    assert not runner.calls() and not runner.output.exists()
+
+
+@pytest.mark.parametrize("use_environment", [False, True])
+def test_custom_schedule_derives_all_checkpoint_epochs(runner, use_environment):
+    flags = [] if use_environment else ["--input-long-side", "518", "--epochs", "15"]
+    environment = {"INPUT_LONG_SIDE": "518", "EPOCHS": "15"} if use_environment else {}
+    result = runner("run_kitti_dc_full.sh", "eval-val", "--models", "depth", *flags,
+                    "--dry-run", env_updates=environment)
+    assert result.returncode == 0, result.stderr
+    commands = runner.dry_commands(result)
+    assert [Path(value(args, "--checkpoint")).name for args in commands[:-1]] == [
+        "checkpoint-epoch5.pth", "checkpoint-epoch10.pth", "checkpoint-epoch15.pth",
+    ]
+    for args in commands[:-1]:
+        assert value(args, "--input-long-side") == "518"
+        assert value(args, "--epochs") == "15"
+        assert Path(value(args, "--output-dir")).name == "left_long518_15ep_seed0"
+    assert not runner.output.exists() and not runner.calls()
+
+
+def test_518_summary_needs_only_output_root(runner):
+    result = runner(SUITE_518, "summarize", paths=False)
+    assert result.returncode == 0, result.stderr
+    assert runner.calls() == [["-m", "occany_depth_min.kitti_dc_full", "summarize", "--output-root", str(runner.output)]]

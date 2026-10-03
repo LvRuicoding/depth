@@ -20,14 +20,15 @@ from occany_depth_min.metrics import restore_to_native, UnifiedDepthMetricAccumu
 
 
 @pytest.mark.parametrize("w,h", [(1242, 375), (1224, 370), (1238, 374), (1226, 370), (1241, 376)])
-def test_full_fov_geometry_and_half_pixel_projection(w, h):
+@pytest.mark.parametrize("long_side,padded_hw", [(1232, (378, 1232)), (518, (168, 518))])
+def test_full_fov_geometry_and_half_pixel_projection(w, h, long_side, padded_hw):
     rgb = np.full((h, w, 3), 128, dtype=np.uint8)
     rgb[:, 0], rgb[:, -1] = [255, 0, 0], [0, 255, 0]
     gt = np.full((h, w), 7.5, dtype=np.float32)
     K = np.array([[720., 0, w / 2 - 7], [0, 710., h / 2 - 11], [0, 0, 1]])
-    out, depth, mask, resized_K, metadata = letterbox_full_image(rgb, gt, K)
-    assert out.shape == (378, 1232, 3)
-    assert depth.shape == mask.shape == (378, 1232)
+    out, depth, mask, resized_K, metadata = letterbox_full_image(rgb, gt, K, long_side=long_side)
+    assert out.shape == (*padded_hw, 3)
+    assert depth.shape == mask.shape == padded_hw
     nh, nw = metadata["resized_hw"]
     top, bottom, left, right = metadata["pad_tblr"]
     assert nh <= h and nw <= w
@@ -190,7 +191,8 @@ def test_smoke_sampler_reaches_partial_tail_without_changing_full_data():
 
 
 
-def test_training_saves_before_val_only_every_five_epochs(tmp_path, monkeypatch):
+@pytest.mark.parametrize("long_side,epochs", [(1232, 10), (518, 5)])
+def test_training_saves_before_val_only_every_five_epochs(tmp_path, monkeypatch, long_side, epochs):
     from occany_depth_min.kitti_dc_full import train as trainer
 
     pretrained = tmp_path / 'pretrained'
@@ -222,7 +224,13 @@ def test_training_saves_before_val_only_every_five_epochs(tmp_path, monkeypatch)
     monkeypatch.setattr(torch.cuda, 'max_memory_allocated', lambda *args: 0)
     monkeypatch.setattr(trainer, 'rng_state', lambda device: {})
     monkeypatch.setattr(trainer, 'restore_rng', lambda *args: None)
-    monkeypatch.setattr(trainer, 'KITTIDepthCompletionDataset', lambda *args, **kwargs: [0])
+    dataset_sizes = []
+
+    def dataset(*args, **kwargs):
+        dataset_sizes.append(kwargs['input_long_side'])
+        return [0]
+
+    monkeypatch.setattr(trainer, 'KITTIDepthCompletionDataset', dataset)
     monkeypatch.setattr(trainer, 'protocol_config', lambda *args: {})
     monkeypatch.setattr(trainer, 'loader', lambda *args, training, **kwargs: TrainingLoader() if training else [0])
     monkeypatch.setattr(trainer, 'build_model', lambda args: model)
@@ -243,15 +251,18 @@ def test_training_saves_before_val_only_every_five_epochs(tmp_path, monkeypatch)
 
     monkeypatch.setattr(trainer, 'evaluate', evaluate)
     trainer.main(['--model', 'image', '--num-workers', '0',
+                  '--input-long-side', str(long_side), '--epochs', str(epochs),
                   '--da3-checkpoint', str(pretrained), '--output-dir', str(output)])
-    assert evaluated == [5, 10]
-    assert sorted(path.name for path in output.glob('*.pth')) == [
-        'checkpoint-epoch10.pth', 'checkpoint-epoch5.pth', 'checkpoint-last.pth']
-    assert sorted(path.name for path in output.glob('eval_val_*.json')) == [
-        'eval_val_epoch4.json', 'eval_val_epoch9.json']
+    expected_epochs = list(range(5, epochs + 1, 5))
+    assert dataset_sizes == [long_side, long_side]
+    assert evaluated == expected_epochs
+    assert {path.name for path in output.glob('*.pth')} == {
+        *(f'checkpoint-epoch{epoch}.pth' for epoch in expected_epochs), 'checkpoint-last.pth'}
+    assert {path.name for path in output.glob('eval_val_*.json')} == {
+        f'eval_val_epoch{epoch - 1}.json' for epoch in expected_epochs}
     logs = [json.loads(line) for line in (output / 'log.jsonl').read_text().splitlines()]
-    assert len(logs) == 10
-    assert [log['epoch'] + 1 for log in logs if 'datasets' in log] == [5, 10]
+    assert len(logs) == epochs
+    assert [log['epoch'] + 1 for log in logs if 'datasets' in log] == expected_epochs
 
 
 def test_raw_points_returned_once_with_intensity_and_ragged_collate(small_raw_root, monkeypatch):
@@ -347,14 +358,15 @@ def test_rgb_normalization_matches_original_torchvision_arithmetic():
     torch.testing.assert_close(normalize_rgb(rgb), original, rtol=0, atol=0)
 
 
-def test_fixed_training_cli_and_mode_validation(monkeypatch):
+def test_training_defaults_and_mode_validation(monkeypatch):
     from occany_depth_min.kitti_dc_full import train
     args = train.get_parser().parse_args(['--model', 'depth'])
     assert (args.epochs, args.input_long_side, args.batch_size, args.amp, args.seed) == (10, 1232, 1, 'bf16', 0)
     assert (args.lr, args.min_lr, args.weight_decay, args.warmup_epochs) == (1e-4, 1e-6, 1e-4, 1)
     assert [lr_at(args, progress) for progress in (0, 1, 10)] == [0, 1e-4, 1e-6]
-    with pytest.raises(SystemExit):
-        train.get_parser().parse_args(['--model', 'depth', '--epochs', '20'])
+    small = train.get_parser().parse_args(['--model', 'depth', '--input-long-side', '518', '--epochs', '5'])
+    assert (small.epochs, small.input_long_side, small.batch_size, small.amp, small.seed) == (5, 518, 1, 'bf16', 0)
+    assert [lr_at(small, progress) for progress in (0, 1, 5)] == [0, 1e-4, 1e-6]
     with pytest.raises(ValueError, match='requires --checkpoint'):
         train.main(['--model', 'image'], mode='eval-val')
     with pytest.raises(ValueError, match='only for smoke'):
@@ -367,6 +379,13 @@ def test_fixed_training_cli_and_mode_validation(monkeypatch):
     monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
     with pytest.raises(RuntimeError, match='no CUDA'):
         train.main(['--model', 'image'], mode='smoke')
+
+
+@pytest.mark.parametrize("flag", ['--input-long-side', '--epochs'])
+@pytest.mark.parametrize("value", ['0', '-1', '5.5'])
+def test_resolution_and_schedule_reject_invalid_values(flag, value):
+    with pytest.raises(SystemExit):
+        get_parser().parse_args(['--model', 'image', flag, value])
 
 
 def test_protocol_fusion_compatibility_and_legacy_defaults(tmp_path):

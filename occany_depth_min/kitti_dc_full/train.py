@@ -50,6 +50,16 @@ def validate_output_path(path, args):
         raise ValueError("Post-fusion outputs must be outside the existing prefusion kitti_dc_full directory")
 
 
+def _positive_int(value):
+    try:
+        result = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a positive integer") from None
+    if result <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return result
+
+
 def get_parser(*, mode="train"):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=tuple(MODEL_CLASSES), required=True)
@@ -58,15 +68,19 @@ def get_parser(*, mode="train"):
     parser.add_argument("--kitti-dc-root", default=os.environ.get("KITTI_DC_ROOT", str(REPO_ROOT / "raw_data/kitti_full")))
     parser.add_argument("--da3-checkpoint", dest="occany_ckpt", default=os.environ.get("DA3_CHECKPOINT", str(REPO_ROOT / "checkpoints/DA3-BASE")))
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--input-long-side", type=_positive_int, default=1232,
+                        help="Full-FOV resize long side before patch-14 padding (default: 1232)")
+    parser.add_argument("--epochs", type=_positive_int, default=10,
+                        help="Training schedule length, also required for checkpoint evaluation (default: 10)")
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--print-freq", type=int, default=20)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--checkpoint", type=Path, help="Training checkpoint for eval-val")
     parser.add_argument("--prediction-dir", type=Path, help="Optional native-grid float32 .npy predictions for eval-val")
     parser.add_argument("--smoke-steps", type=int, default=2 if mode == "smoke" else 0)
-    # The released full-KITTI protocol is fixed; these are not tuning flags.
-    parser.set_defaults(dataset="kitti_dc_full", eval_split="val", input_long_side=1232,
-                        epochs=10, batch_size=1, amp="bf16", seed=0, lr=1e-4,
+    # Resolution and schedule select the suite; other training settings stay fixed.
+    parser.set_defaults(dataset="kitti_dc_full", eval_split="val",
+                        batch_size=1, amp="bf16", seed=0, lr=1e-4,
                         weight_decay=1e-4, warmup_epochs=1, min_lr=1e-6,
                         dense_depth_loss_weight=0.1, eval_only=mode == "eval-val", mode=mode)
     return parser
@@ -267,8 +281,8 @@ def restore_rng(state, device):
 def _run(args):
     if args.voxel_encoder == "vfe" and args.model not in VFE_MODELS:
         raise ValueError("--voxel-encoder vfe requires a model with voxel tokens")
-    if args.epochs <= 0 or args.smoke_steps < 0 or args.num_workers < 0 or args.print_freq < 0:
-        raise ValueError("Invalid epochs, smoke steps, worker count or print frequency")
+    if args.input_long_side <= 0 or args.epochs <= 0 or args.smoke_steps < 0 or args.num_workers < 0 or args.print_freq < 0:
+        raise ValueError("Invalid input long side, epochs, smoke steps, worker count or print frequency")
     if args.eval_only != bool(args.checkpoint):
         raise ValueError("eval-val requires --checkpoint; --checkpoint is evaluation-only")
     if args.prediction_dir and not args.eval_only:
